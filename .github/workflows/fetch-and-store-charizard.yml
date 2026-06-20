@@ -13,7 +13,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install psycopg
-        run: pip install psycopg[binary]
+        run: pip install "psycopg[binary]"
 
       - name: Fetch eBay listings and store in Supabase
         env:
@@ -27,119 +27,133 @@ jobs:
           import base64
           import urllib.parse
           import urllib.request
+          import traceback
           import psycopg
 
-          client_id = os.environ["EBAY_CLIENT_ID"]
-          client_secret = os.environ["EBAY_CLIENT_SECRET"]
-          database_url = os.environ["DATABASE_URL"]
+          try:
+              client_id = os.environ["EBAY_CLIENT_ID"]
+              client_secret = os.environ["EBAY_CLIENT_SECRET"]
+              database_url = os.environ["DATABASE_URL"]
 
-          credentials = f"{client_id}:{client_secret}"
-          encoded = base64.b64encode(credentials.encode()).decode()
+              print("Step 1: Getting eBay token...")
 
-          token_data = urllib.parse.urlencode({
-              "grant_type": "client_credentials",
-              "scope": "https://api.ebay.com/oauth/api_scope"
-          }).encode()
+              credentials = f"{client_id}:{client_secret}"
+              encoded = base64.b64encode(credentials.encode()).decode()
 
-          token_req = urllib.request.Request(
-              "https://api.ebay.com/identity/v1/oauth2/token",
-              data=token_data,
-              headers={
-                  "Authorization": f"Basic {encoded}",
-                  "Content-Type": "application/x-www-form-urlencoded"
-              },
-              method="POST"
-          )
+              token_data = urllib.parse.urlencode({
+                  "grant_type": "client_credentials",
+                  "scope": "https://api.ebay.com/oauth/api_scope"
+              }).encode()
 
-          with urllib.request.urlopen(token_req) as resp:
-              token_json = json.loads(resp.read().decode())
-              access_token = token_json["access_token"]
+              token_req = urllib.request.Request(
+                  "https://api.ebay.com/identity/v1/oauth2/token",
+                  data=token_data,
+                  headers={
+                      "Authorization": f"Basic {encoded}",
+                      "Content-Type": "application/x-www-form-urlencoded"
+                  },
+                  method="POST"
+              )
 
-          browse_url = "https://api.ebay.com/buy/browse/v1/item_summary/search?q=charizard&limit=25"
-          browse_req = urllib.request.Request(
-              browse_url,
-              headers={
-                  "Authorization": f"Bearer {access_token}",
-                  "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
-              },
-              method="GET"
-          )
+              with urllib.request.urlopen(token_req) as resp:
+                  token_json = json.loads(resp.read().decode())
+                  access_token = token_json["access_token"]
 
-          with urllib.request.urlopen(browse_req) as resp:
-              data = json.loads(resp.read().decode())
+              print("Step 2: Fetching Charizard listings...")
 
-          items = data.get("itemSummaries", [])
-          print(f"Fetched {len(items)} listings from eBay.")
+              browse_url = "https://api.ebay.com/buy/browse/v1/item_summary/search?q=charizard&limit=25"
+              browse_req = urllib.request.Request(
+                  browse_url,
+                  headers={
+                      "Authorization": f"Bearer {access_token}",
+                      "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
+                  },
+                  method="GET"
+              )
 
-          with psycopg.connect(database_url) as conn:
-              with conn.cursor() as cur:
-                  stored = 0
-                  for item in items:
-                      ebay_item_id = item.get("itemId")
-                      title = item.get("title")
-                      item_web_url = item.get("itemWebUrl")
-                      price = item.get("price") or {}
-                      price_value = price.get("value")
-                      price_currency = price.get("currency")
-                      condition = item.get("condition")
-                      image = item.get("image") or {}
-                      image_url = image.get("imageUrl")
-                      seller = item.get("seller") or {}
-                      seller_username = seller.get("username")
-                      listing_start = item.get("itemCreationDate")
-                      listing_end = item.get("itemEndDate")
-                      raw_json = json.dumps(item)
+              with urllib.request.urlopen(browse_req) as resp:
+                  data = json.loads(resp.read().decode())
 
-                      if not ebay_item_id or not title:
-                          continue
+              items = data.get("itemSummaries", [])
+              print(f"Fetched {len(items)} listings from eBay.")
 
-                      cur.execute("""
-                          insert into public.listings (
+              print("Step 3: Connecting to Supabase...")
+              print("DATABASE_URL starts with:", database_url[:35])
+
+              with psycopg.connect(database_url) as conn:
+                  with conn.cursor() as cur:
+                      stored = 0
+                      for item in items:
+                          ebay_item_id = item.get("itemId")
+                          title = item.get("title")
+                          item_web_url = item.get("itemWebUrl")
+                          price = item.get("price") or {}
+                          price_value = price.get("value")
+                          price_currency = price.get("currency")
+                          condition = item.get("condition")
+                          image = item.get("image") or {}
+                          image_url = image.get("imageUrl")
+                          seller = item.get("seller") or {}
+                          seller_username = seller.get("username")
+                          listing_start = item.get("itemCreationDate")
+                          listing_end = item.get("itemEndDate")
+                          raw_json = json.dumps(item)
+
+                          if not ebay_item_id or not title:
+                              continue
+
+                          cur.execute("""
+                              insert into public.listings (
+                                  ebay_item_id,
+                                  title,
+                                  item_web_url,
+                                  price_value,
+                                  price_currency,
+                                  condition_text,
+                                  image_url,
+                                  seller_username,
+                                  listing_start,
+                                  listing_end,
+                                  raw_json,
+                                  first_seen_at,
+                                  last_seen_at
+                              )
+                              values (
+                                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now(), now()
+                              )
+                              on conflict (ebay_item_id)
+                              do update set
+                                  title = excluded.title,
+                                  item_web_url = excluded.item_web_url,
+                                  price_value = excluded.price_value,
+                                  price_currency = excluded.price_currency,
+                                  condition_text = excluded.condition_text,
+                                  image_url = excluded.image_url,
+                                  seller_username = excluded.seller_username,
+                                  listing_start = excluded.listing_start,
+                                  listing_end = excluded.listing_end,
+                                  raw_json = excluded.raw_json,
+                                  last_seen_at = now()
+                          """, (
                               ebay_item_id,
                               title,
                               item_web_url,
                               price_value,
                               price_currency,
-                              condition_text,
+                              condition,
                               image_url,
                               seller_username,
                               listing_start,
                               listing_end,
-                              raw_json,
-                              first_seen_at,
-                              last_seen_at
-                          )
-                          values (
-                              %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now(), now()
-                          )
-                          on conflict (ebay_item_id)
-                          do update set
-                              title = excluded.title,
-                              item_web_url = excluded.item_web_url,
-                              price_value = excluded.price_value,
-                              price_currency = excluded.price_currency,
-                              condition_text = excluded.condition_text,
-                              image_url = excluded.image_url,
-                              seller_username = excluded.seller_username,
-                              listing_start = excluded.listing_start,
-                              listing_end = excluded.listing_end,
-                              raw_json = excluded.raw_json,
-                              last_seen_at = now()
-                      """, (
-                          ebay_item_id,
-                          title,
-                          item_web_url,
-                          price_value,
-                          price_currency,
-                          condition,
-                          image_url,
-                          seller_username,
-                          listing_start,
-                          listing_end,
-                          raw_json
-                      ))
-                      stored += 1
+                              raw_json
+                          ))
+                          stored += 1
 
-                  conn.commit()
-                  print(f"Stored or updated {stored} listings in Supabase.")
+                      conn.commit()
+                      print(f"Stored or updated {stored} listings in Supabase.")
+
+          except Exception as e:
+              print("REAL ERROR:")
+              traceback.print_exc()
+              raise
           PY
