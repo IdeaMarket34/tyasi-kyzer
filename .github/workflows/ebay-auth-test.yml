@@ -7,21 +7,51 @@ jobs:
   auth-test:
     runs-on: ubuntu-latest
     steps:
-      - name: Get eBay app token
-        shell: bash
+      - name: Get eBay app token with Python
         env:
           EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
           EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
         run: |
-          AUTH=$(printf "%s:%s" "$EBAY_CLIENT_ID" "$EBAY_CLIENT_SECRET" | base64)
+          python << 'PY'
+          import os
+          import sys
+          import json
+          import base64
+          import urllib.parse
+          import urllib.request
 
-          curl --request POST --silent --show-error \
-            --url "https://api.ebay.com/identity/v1/oauth2/token" \
-            --header "Content-Type: application/x-www-form-urlencoded" \
-            --header "Authorization: Basic $AUTH" \
-            --data "grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope" \
-            --output response.json
+          client_id = os.environ["EBAY_CLIENT_ID"]
+          client_secret = os.environ["EBAY_CLIENT_SECRET"]
 
-          cat response.json
+          credentials = f"{client_id}:{client_secret}"
+          encoded = base64.b64encode(credentials.encode()).decode()
 
-          python -c "import json,sys; d=json.load(open('response.json')); sys.exit(0 if 'access_token' in d else 1)"
+          data = urllib.parse.urlencode({
+              "grant_type": "client_credentials",
+              "scope": "https://api.ebay.com/oauth/api_scope"
+          }).encode()
+
+          req = urllib.request.Request(
+              "https://api.ebay.com/identity/v1/oauth2/token",
+              data=data,
+              headers={
+                  "Authorization": f"Basic {encoded}",
+                  "Content-Type": "application/x-www-form-urlencoded"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  body = resp.read().decode()
+                  print(body)
+                  parsed = json.loads(body)
+                  if "access_token" in parsed:
+                      print("Success: eBay access token received.")
+                      sys.exit(0)
+                  else:
+                      sys.exit(1)
+          except Exception as e:
+              print(str(e))
+              sys.exit(1)
+          PY
