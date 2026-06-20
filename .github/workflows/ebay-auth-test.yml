@@ -8,15 +8,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Get eBay app token
+        shell: bash
         env:
           EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
           EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
         run: |
-          auth=$(printf '%s:%s' "$EBAY_CLIENT_ID" "$EBAY_CLIENT_SECRET" | base64)
-          curl -s -X POST 'https://api.ebay.com/identity/v1/oauth2/token' \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -H "Authorization: Basic $auth" \
-            -d 'grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope' \
-            > response.json
+          AUTH=$(printf "%s:%s" "$EBAY_CLIENT_ID" "$EBAY_CLIENT_SECRET" | base64)
 
-          python -c "import json,sys; d=json.load(open('response.json')); print(json.dumps(d, indent=2)); sys.exit(0 if 'access_token' in d else 1)"
+          curl --request POST --silent --show-error \
+            --url "https://api.ebay.com/identity/v1/oauth2/token" \
+            --header "Content-Type: application/x-www-form-urlencoded" \
+            --header "Authorization: Basic $AUTH" \
+            --data "grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope" \
+            --output response.json
+
+          cat response.json
+
+          python -c "import json,sys; d=json.load(open('response.json')); sys.exit(0 if 'access_token' in d else 1)"
