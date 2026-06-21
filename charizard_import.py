@@ -152,7 +152,30 @@ def map_item_to_sold_comp(item: dict) -> dict:
 
 
 def insert_rows(rows):
-    return supabase.table("sold_comps").upsert(rows, on_conflict="source,external_comp_id").execute()
+    if not rows:
+        return None
+
+    external_ids = [row["external_comp_id"] for row in rows if row.get("external_comp_id")]
+
+    existing = (
+        supabase.table("sold_comps")
+        .select("external_comp_id")
+        .eq("source", "ebay_browse")
+        .in_("external_comp_id", external_ids)
+        .execute()
+    )
+
+    existing_ids = {row["external_comp_id"] for row in existing.data} if existing.data else set()
+
+    new_rows = [row for row in rows if row.get("external_comp_id") not in existing_ids]
+
+    print(f"Skipping {len(rows) - len(new_rows)} duplicate rows...")
+
+    if not new_rows:
+        print("No new rows to insert.")
+        return None
+
+    return supabase.table("sold_comps").insert(new_rows).execute()
 
 def main():
     print("Getting eBay token...")
