@@ -264,7 +264,7 @@ def process_event(row: dict) -> Tuple[bool, str]:
     upsert_listing_card_match(market_listing_id, bundle)
     upsert_seller_profile(bundle)
     replace_listing_images(market_listing_id, row["source_listing_id"], bundle)
-    maybe_insert_sold_comp(bundle)
+    # maybe_insert_sold_comp(bundle)
     mark_jobs_done(row["source_listing_id"])
     return True, row["source_listing_id"]
 
