@@ -2,9 +2,6 @@ import importlib.util
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-
-BASE_DIR = Path(__file__).resolve().parent
-CHARIZARD_REWRITE_PATH = BASE_DIR / "charizard_ingest_rewrite.py"
 from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -16,10 +13,8 @@ load_dotenv()
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 PARSER_BATCH_SIZE = int(os.environ.get("PARSER_BATCH_SIZE", "50"))
-CHARIZARD_REWRITE_PATH = os.environ.get(
-    "CHARIZARD_REWRITE_PATH",
-    "/home/user/output/charizard_ingest_rewrite.py",
-)
+BASE_DIR = Path(__file__).resolve().parent
+CHARIZARD_REWRITE_PATH = BASE_DIR / "charizard_ingest_rewrite.py"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
