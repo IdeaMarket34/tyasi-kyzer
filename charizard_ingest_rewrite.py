@@ -1087,9 +1087,7 @@ def run_charizard_enrichment_job(access_token: str, items: List[dict], chunk_siz
             parse_row["market_listing_id"] = market_listing_id
             parse_rows.append(parse_row)
         upsert_listing_parses_batch(parse_rows, chunk_size=100)
-        sold_rows = [b["sold_comp_row"] for b in bundles]
-        inserted = insert_sold_comps(sold_rows, chunk_size=100)
-        print(f"Finished chunk {chunk_index}; inserted {inserted} sold comps")
+        print(f"Finished chunk {chunk_index}; sold comp insertion disabled")
 
 
 def main() -> None:
