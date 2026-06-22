@@ -2,6 +2,9 @@ import importlib.util
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+CHARIZARD_REWRITE_PATH = BASE_DIR / "charizard_ingest_rewrite.py"
 from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
