@@ -1,8 +1,9 @@
 import base64
+import hashlib
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -16,21 +17,37 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 EBAY_CLIENT_ID = os.environ["EBAY_CLIENT_ID"]
 EBAY_CLIENT_SECRET = os.environ["EBAY_CLIENT_SECRET"]
-EBAY_REFRESH_TOKEN = os.environ["EBAY_REFRESH_TOKEN"]
-
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+EBAY_MARKETPLACE_ID = os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US")
 
 WORKER_ID = os.environ.get("WORKER_ID", "github-actions-detail-worker")
 JOB_BATCH_SIZE = int(os.environ.get("JOB_BATCH_SIZE", "25"))
 MAX_API_CALLS = int(os.environ.get("MAX_API_CALLS", "50"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
 
+supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+HTTP_SESSION = requests.Session()
+EBAY_ACCESS_TOKEN_CACHE: Optional[str] = None
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def payload_hash(payload: dict) -> str:
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def get_ebay_access_token() -> str:
+    global EBAY_ACCESS_TOKEN_CACHE
+    if EBAY_ACCESS_TOKEN_CACHE:
+        return EBAY_ACCESS_TOKEN_CACHE
+
     token_url = "https://api.ebay.com/identity/v1/oauth2/token"
     basic = base64.b64encode(f"{EBAY_CLIENT_ID}:{EBAY_CLIENT_SECRET}".encode()).decode()
     headers = {
@@ -38,14 +55,18 @@ def get_ebay_access_token() -> str:
         "Content-Type": "application/x-www-form-urlencoded",
     }
     data = {
-        "grant_type": "refresh_token",
-        "refresh_token": EBAY_REFRESH_TOKEN,
+        "grant_type": "client_credentials",
         "scope": "https://api.ebay.com/oauth/api_scope",
     }
-    response = requests.post(token_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
+
+    log("Requesting eBay application access token...")
+    response = HTTP_SESSION.post(token_url, headers=headers, data=data, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
+
     payload = response.json()
-    return payload["access_token"]
+    EBAY_ACCESS_TOKEN_CACHE = payload["access_token"]
+    log("eBay application token acquired.")
+    return EBAY_ACCESS_TOKEN_CACHE
 
 
 def claim_jobs(limit: int) -> List[Dict[str, Any]]:
@@ -93,29 +114,28 @@ def fetch_item_detail(access_token: str, source_listing_id: str) -> Dict[str, An
     url = f"https://api.ebay.com/buy/browse/v1/item/{source_listing_id}"
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-EBAY-C-MARKETPLACE-ID": EBAY_MARKETPLACE_ID,
     }
 
     max_attempts = 5
     delay = 2
 
     for attempt in range(1, max_attempts + 1):
-        response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        response = HTTP_SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
 
         if response.status_code == 429:
             if attempt == max_attempts:
                 raise RuntimeError("http_429")
             retry_after = response.headers.get("Retry-After")
             sleep_for = int(retry_after) if retry_after and retry_after.isdigit() else delay
+            log(f"Rate limited for {source_listing_id}; retrying in {sleep_for}s")
             time.sleep(sleep_for)
             delay = min(delay * 2, 60)
             continue
 
         if response.status_code >= 400:
-            try:
-                body = response.text[:500]
-            except Exception:
-                body = ""
+            body = response.text[:1000] if response.text else ""
             raise RuntimeError(f"http_{response.status_code}: {body}")
 
         return response.json()
@@ -150,11 +170,12 @@ def build_market_listing_patch(detail: Dict[str, Any]) -> Dict[str, Any]:
         "raw_title": detail.get("title"),
         "listing_url": detail.get("itemWebUrl"),
         "raw_payload": detail,
-        "seller_name": seller.get("username") or seller.get("feedbackPercentage"),
+        "seller_name": seller.get("username"),
         "seller_id": seller.get("username"),
-        "current_price_value": price.get("value"),
+        "current_price_value": float(price["value"]) if price.get("value") is not None else None,
         "current_price_currency": price.get("currency"),
-        "shipping_value": shipping_value,
+        "shipping_value": float(shipping_value) if shipping_value is not None else None,
+        "shipping_currency": shipping_currency,
         "item_location": item_location.get("country") or item_location.get("city"),
         "primary_image_url": image.get("imageUrl"),
         "condition_text": condition,
@@ -176,7 +197,7 @@ def upsert_raw_market_event(
         "source_listing_id": source_listing_id,
         "event_type": "detail",
         "observed_at": utc_now_iso(),
-        "payload_hash": None,
+        "payload_hash": payload_hash(payload),
         "payload_json": payload,
         "created_at": utc_now_iso(),
     }
@@ -244,9 +265,8 @@ def mark_job_failed(job: Dict[str, Any], error_text: str) -> None:
 
     if not terminal:
         backoff_minutes = min(60, 2 ** max(1, attempt_count))
-        available_at = datetime.now(timezone.utc).timestamp() + backoff_minutes * 60
-        update_payload["available_at"] = datetime.fromtimestamp(
-            available_at, tz=timezone.utc
+        update_payload["available_at"] = (
+            datetime.now(timezone.utc) + timedelta(minutes=backoff_minutes)
         ).isoformat()
 
     (
@@ -273,14 +293,15 @@ def process_job(access_token: str, job: Dict[str, Any]) -> Tuple[bool, str]:
 
 
 def main() -> None:
-    print("Getting eBay token...")
+    log("Starting detail fetch worker...")
     access_token = get_ebay_access_token()
 
-    print("Claiming jobs...")
+    log("Claiming jobs...")
     jobs = claim_jobs(JOB_BATCH_SIZE)
-    print(f"Claimed {len(jobs)} detail jobs")
+    log(f"Claimed {len(jobs)} detail jobs")
 
     if not jobs:
+        log("No detail jobs available.")
         return
 
     processed = 0
@@ -289,7 +310,7 @@ def main() -> None:
 
     for job in jobs:
         if processed >= MAX_API_CALLS:
-            print("Reached max API call budget for this run")
+            log("Reached max API call budget for this run")
             break
 
         try:
@@ -297,19 +318,19 @@ def main() -> None:
             processed += 1
             if ok:
                 succeeded += 1
-                print(f"detail ok for {message}")
+                log(f"detail ok for {message}")
             else:
                 failed += 1
                 mark_job_failed(job, message)
-                print(f"detail failed for {job['source_listing_id']}: {message}")
+                log(f"detail failed for {job['source_listing_id']}: {message}")
         except Exception as exc:
             processed += 1
             failed += 1
             err = str(exc)
             mark_job_failed(job, err)
-            print(f"detail failed for {job['source_listing_id']}: {err}")
+            log(f"detail failed for {job['source_listing_id']}: {err}")
 
-    print(
+    log(
         json.dumps(
             {
                 "claimed": len(jobs),
