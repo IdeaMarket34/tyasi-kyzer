@@ -40,15 +40,58 @@ map_item_to_bundle = rewrite.map_item_to_bundle
 
 
 def load_detail_events(limit: int = PARSER_BATCH_SIZE) -> List[dict]:
-    result = (
-        supabase.table("raw_market_events")
-        .select("id,source,source_listing_id,payload_json,observed_at")
-        .eq("event_type", "detail")
-        .order("observed_at", desc=False)
-        .limit(limit)
+    parsed = (
+        supabase.table("listing_parses")
+        .select("market_listing_id")
         .execute()
     )
-    return result.data or []
+    parsed_ids = {
+        row["market_listing_id"]
+        for row in (parsed.data or [])
+        if row.get("market_listing_id") is not None
+    }
+
+    listings = (
+        supabase.table("market_listings")
+        .select("id,source,source_listing_id,last_detail_refresh_at")
+        .eq("source", "ebay")
+        .not_.is_("last_detail_refresh_at", "null")
+        .order("last_detail_refresh_at", desc=False)
+        .limit(max(limit * 10, 500))
+        .execute()
+    )
+
+    candidate_rows = []
+    for row in (listings.data or []):
+        if row["id"] not in parsed_ids:
+            candidate_rows.append(row)
+        if len(candidate_rows) >= limit:
+            break
+
+    if not candidate_rows:
+        return []
+
+    keys = {(row["source"], row["source_listing_id"]) for row in candidate_rows}
+    events = (
+        supabase.table("raw_market_events")
+        .select("id,source,source_listing_id,payload_json,observed_at,event_type")
+        .eq("event_type", "detail")
+        .order("observed_at", desc=False)
+        .limit(max(limit * 20, 1000))
+        .execute()
+    )
+
+    picked = []
+    seen = set()
+    for row in (events.data or []):
+        key = (row["source"], row["source_listing_id"])
+        if key in keys and key not in seen:
+            picked.append(row)
+            seen.add(key)
+        if len(picked) >= limit:
+            break
+
+    return picked
 
 
 def get_market_listing_id(source: str, source_listing_id: str) -> Optional[int]:
