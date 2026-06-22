@@ -239,34 +239,46 @@ def queue_enrichment_jobs(source: str, listing_ids: List[str], reason: str = "ne
 
 
 def upsert_market_listing_summaries(source: str, items: List[dict]) -> None:
-    rows = []
+    # De-duplicate by source_listing_id so ON CONFLICT does not hit the same key twice
     now_ts = utc_now()
+    by_id: Dict[str, dict] = {}
 
     for item in items:
+        listing_id = item.get("itemId")
+        if not listing_id:
+            continue
+
         price = item.get("price") or {}
-        rows.append(
-            {
-                "source": source,
-                "source_listing_id": item.get("itemId"),
-                "raw_title": item.get("title"),
-                "listing_url": item.get("itemWebUrl"),
-                "price_value": float(price["value"]) if price.get("value") else None,
-                "current_price_value": float(price["value"]) if price.get("value") else None,
-                "current_price_currency": price.get("currency", "USD"),
-                "condition_text": item.get("condition"),
-                "listing_type": item.get("buyingOptions", [None])[0] if item.get("buyingOptions") else None,
-                "listing_start": item.get("itemCreationDate"),
-                "listing_end": item.get("itemEndDate"),
-                "listing_status": "active",
-                "last_seen_at": now_ts,
-                "first_seen_at": now_ts,
-                "raw_payload": item,
-            }
-        )
+
+        row = {
+            "source": source,
+            "source_listing_id": listing_id,
+            "raw_title": item.get("title"),
+            "listing_url": item.get("itemWebUrl"),
+            "price_value": float(price["value"]) if price.get("value") else None,
+            "current_price_value": float(price["value"]) if price.get("value") else None,
+            "current_price_currency": price.get("currency", "USD"),
+            "condition_text": item.get("condition"),
+            "listing_type": item.get("buyingOptions", [None])[0] if item.get("buyingOptions") else None,
+            "listing_start": item.get("itemCreationDate"),
+            "listing_end": item.get("itemEndDate"),
+            "listing_status": "active",
+            "last_seen_at": now_ts,
+            "first_seen_at": now_ts,
+            "raw_payload": item,
+        }
+
+        # Last one wins for that listing_id within this batch
+        by_id[listing_id] = row
+
+    rows = list(by_id.values())
 
     for i in range(0, len(rows), 200):
         chunk = rows[i : i + 200]
-        supabase.table("market_listings").upsert(chunk, on_conflict="source_listing_id").execute()
+        supabase.table("market_listings").upsert(
+            chunk,
+            on_conflict="source_listing_id"
+        ).execute()
 
 
 def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int]:
