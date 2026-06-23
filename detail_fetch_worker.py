@@ -10,7 +10,6 @@ import requests
 from dotenv import load_dotenv
 from supabase import create_client
 
-
 load_dotenv()
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -23,11 +22,20 @@ WORKER_ID = os.environ.get("WORKER_ID", "github-actions-detail-worker")
 JOB_BATCH_SIZE = int(os.environ.get("JOB_BATCH_SIZE", "25"))
 MAX_API_CALLS = int(os.environ.get("MAX_API_CALLS", "50"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
+LOCK_STALE_MINUTES = int(os.environ.get("LOCK_STALE_MINUTES", "30"))
+WORKER_RATE_LIMIT_BACKOFF_SECONDS = int(os.environ.get("WORKER_RATE_LIMIT_BACKOFF_SECONDS", "300"))
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 HTTP_SESSION = requests.Session()
 EBAY_ACCESS_TOKEN_CACHE: Optional[str] = None
+
+
+class WorkerRateLimitError(Exception):
+    def __init__(self, sleep_seconds: int, message: str = "worker_rate_limited") -> None:
+        super().__init__(message)
+        self.sleep_seconds = sleep_seconds
+        self.message = message
 
 
 def log(message: str) -> None:
@@ -67,6 +75,45 @@ def get_ebay_access_token() -> str:
     EBAY_ACCESS_TOKEN_CACHE = payload["access_token"]
     log("eBay application token acquired.")
     return EBAY_ACCESS_TOKEN_CACHE
+
+
+def release_stale_running_jobs() -> int:
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=LOCK_STALE_MINUTES)).isoformat()
+    result = (
+        supabase.table("enrichment_jobs")
+        .select("id,status,job_type,locked_at")
+        .eq("status", "running")
+        .eq("job_type", "detail_fetch")
+        .lt("locked_at", cutoff)
+        .execute()
+    )
+
+    stale_jobs = result.data or []
+    released = 0
+
+    for job in stale_jobs:
+        update = (
+            supabase.table("enrichment_jobs")
+            .update(
+                {
+                    "status": "queued",
+                    "locked_at": None,
+                    "worker_id": None,
+                    "last_error": f"lock_released_after_{LOCK_STALE_MINUTES}m",
+                    "updated_at": utc_now_iso(),
+                    "available_at": utc_now_iso(),
+                }
+            )
+            .eq("id", job["id"])
+            .eq("status", "running")
+            .execute()
+        )
+        if update.data:
+            released += 1
+
+    if released:
+        log(f"Released {released} stale running detail jobs")
+    return released
 
 
 def claim_jobs(limit: int) -> List[Dict[str, Any]]:
@@ -118,19 +165,33 @@ def fetch_item_detail(access_token: str, source_listing_id: str) -> Dict[str, An
         "X-EBAY-C-MARKETPLACE-ID": EBAY_MARKETPLACE_ID,
     }
 
-    max_attempts = 5
+    max_attempts = 3
     delay = 2
+    last_retry_after: Optional[int] = None
 
     for attempt in range(1, max_attempts + 1):
         response = HTTP_SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
 
         if response.status_code == 429:
-            if attempt == max_attempts:
-                raise RuntimeError("http_429")
             retry_after = response.headers.get("Retry-After")
             sleep_for = int(retry_after) if retry_after and retry_after.isdigit() else delay
-            log(f"Rate limited for {source_listing_id}; retrying in {sleep_for}s")
+            last_retry_after = sleep_for
+            log(f"Rate limited for {source_listing_id}; attempt {attempt}/{max_attempts}; retrying in {sleep_for}s")
+            if attempt == max_attempts:
+                raise WorkerRateLimitError(
+                    sleep_seconds=max(sleep_for, WORKER_RATE_LIMIT_BACKOFF_SECONDS),
+                    message="http_429",
+                )
             time.sleep(sleep_for)
+            delay = min(delay * 2, 60)
+            continue
+
+        if response.status_code >= 500:
+            body = response.text[:1000] if response.text else ""
+            if attempt == max_attempts:
+                raise RuntimeError(f"http_{response.status_code}: {body}")
+            log(f"Transient server error for {source_listing_id}: {response.status_code}; retrying in {delay}s")
+            time.sleep(delay)
             delay = min(delay * 2, 60)
             continue
 
@@ -140,7 +201,10 @@ def fetch_item_detail(access_token: str, source_listing_id: str) -> Dict[str, An
 
         return response.json()
 
-    raise RuntimeError("detail_fetch_failed")
+    raise WorkerRateLimitError(
+        sleep_seconds=max(last_retry_after or 0, WORKER_RATE_LIMIT_BACKOFF_SECONDS),
+        message="detail_fetch_failed_after_retries",
+    )
 
 
 def build_market_listing_patch(detail: Dict[str, Any]) -> Dict[str, Any]:
@@ -246,7 +310,7 @@ def mark_job_succeeded(job_id: str) -> None:
     )
 
 
-def mark_job_failed(job: Dict[str, Any], error_text: str) -> None:
+def mark_job_failed(job: Dict[str, Any], error_text: str, delay_seconds: Optional[int] = None) -> None:
     attempt_count = job.get("attempt_count") or 1
     max_attempts = job.get("max_attempts") or 5
     terminal = attempt_count >= max_attempts
@@ -261,10 +325,12 @@ def mark_job_failed(job: Dict[str, Any], error_text: str) -> None:
     }
 
     if not terminal:
-        backoff_minutes = min(60, 2 ** max(1, attempt_count))
-        update_payload["available_at"] = (
-            datetime.now(timezone.utc) + timedelta(minutes=backoff_minutes)
-        ).isoformat()
+        if delay_seconds is not None:
+            available_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        else:
+            backoff_minutes = min(60, 2 ** max(1, attempt_count))
+            available_at = datetime.now(timezone.utc) + timedelta(minutes=backoff_minutes)
+        update_payload["available_at"] = available_at.isoformat()
 
     (
         supabase.table("enrichment_jobs")
@@ -272,6 +338,14 @@ def mark_job_failed(job: Dict[str, Any], error_text: str) -> None:
         .eq("id", job["id"])
         .execute()
     )
+
+
+def requeue_unprocessed_jobs(jobs: List[Dict[str, Any]], start_index: int, reason: str, delay_seconds: int) -> int:
+    requeued = 0
+    for job in jobs[start_index:]:
+        mark_job_failed(job, reason, delay_seconds=delay_seconds)
+        requeued += 1
+    return requeued
 
 
 def process_job(access_token: str, job: Dict[str, Any]) -> Tuple[bool, str]:
@@ -291,6 +365,7 @@ def process_job(access_token: str, job: Dict[str, Any]) -> Tuple[bool, str]:
 
 def main() -> None:
     log("Starting detail fetch worker...")
+    released = release_stale_running_jobs()
     access_token = get_ebay_access_token()
 
     log("Claiming jobs...")
@@ -298,16 +373,34 @@ def main() -> None:
     log(f"Claimed {len(jobs)} detail jobs")
 
     if not jobs:
-        log("No detail jobs available.")
+        log(
+            json.dumps(
+                {
+                    "released_stale_jobs": released,
+                    "claimed": 0,
+                    "processed": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                    "requeued_after_worker_rate_limit": 0,
+                }
+            )
+        )
         return
 
     processed = 0
     succeeded = 0
     failed = 0
+    requeued_after_worker_rate_limit = 0
 
-    for job in jobs:
+    for idx, job in enumerate(jobs):
         if processed >= MAX_API_CALLS:
             log("Reached max API call budget for this run")
+            requeued_after_worker_rate_limit += requeue_unprocessed_jobs(
+                jobs,
+                idx,
+                "worker_budget_exhausted",
+                delay_seconds=60,
+            )
             break
 
         try:
@@ -320,6 +413,21 @@ def main() -> None:
                 failed += 1
                 mark_job_failed(job, message)
                 log(f"detail failed for {job['source_listing_id']}: {message}")
+        except WorkerRateLimitError as exc:
+            processed += 1
+            failed += 1
+            mark_job_failed(job, exc.message, delay_seconds=exc.sleep_seconds)
+            log(
+                f"Worker-wide rate limit hit on {job['source_listing_id']}; "
+                f"requeueing remaining jobs for {exc.sleep_seconds}s"
+            )
+            requeued_after_worker_rate_limit += requeue_unprocessed_jobs(
+                jobs,
+                idx + 1,
+                "worker_rate_limited",
+                delay_seconds=exc.sleep_seconds,
+            )
+            break
         except Exception as exc:
             processed += 1
             failed += 1
@@ -330,10 +438,12 @@ def main() -> None:
     log(
         json.dumps(
             {
+                "released_stale_jobs": released,
                 "claimed": len(jobs),
                 "processed": processed,
                 "succeeded": succeeded,
                 "failed": failed,
+                "requeued_after_worker_rate_limit": requeued_after_worker_rate_limit,
             }
         )
     )
