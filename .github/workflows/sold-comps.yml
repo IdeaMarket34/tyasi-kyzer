@@ -1,0 +1,24 @@
+name: sold-comps
+
+on:
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SOLDCOMPS_API_KEY: ${{ secrets.SOLDCOMPS_API_KEY }}
+      SOLD_PROVIDER: soldcomps
+      SOLD_BATCH_SIZE: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - run: pip install -r requirements.txt
+      - run: python sold_comp_collector.py
