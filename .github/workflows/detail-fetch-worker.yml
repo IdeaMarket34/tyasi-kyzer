@@ -1,42 +1,28 @@
-name: Detail Fetch Worker
+name: detail-fetch
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "15 */6 * * *"
-
-concurrency:
-  group: detail-fetch-worker
-  cancel-in-progress: false
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-
+    timeout-minutes: 20
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
+      EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+      EBAY_MARKETPLACE_ID: EBAY_US
+      JOB_BATCH_SIZE: 200
+      MAX_API_CALLS: 200
+      REQUEST_TIMEOUT: 30
+      WORKER_ID: github-actions-detail-worker
     steps:
-      - name: Check out repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run detail fetch worker
-        env:
-          JOB_BATCH_SIZE: "100"
-          MAX_API_CALLS: "100"
-          APP_ENV: production
-          EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
-          EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
-          EBAY_REFRESH_TOKEN: ${{ secrets.EBAY_REFRESH_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python detail_fetch_worker.py
+          python-version: "3.9"
+      - run: pip install -r requirements.txt
+      - run: python detail_fetch_worker.py
