@@ -34,7 +34,8 @@ GRADE_RE = re.compile(r"\b(psa|bgs|cgc|sgc)\s*(\d{1,2}(?:\.\d)?)\b", re.I)
 # cll/clk are the 2023 JP Classic deck codes.
 SET_CODE_RE = re.compile(
     r"\b(sv\d{1,2}[a-z]?|svp|m\d[a-z]?|s\d{1,2}[a-z]?|cll|clk"
-    r"|swsh\d*|swsh|sm\d*|sm|xy\d*|xy|bw\d+|bw|dp|pl|neo\d|base|ecard)\b",
+    r"|swsh\d*|swsh|sm\d*|sm|xy\d*|xy|bw\d+|bw|dp|pl|neo\d|base|ecard"
+    r"|pfl|asc)\b",
     re.I
 )
 
@@ -122,6 +123,9 @@ KNOWN_SET_NAME_PATTERNS = [
     "stormfront",
     "plasma storm",
     "neo destiny",
+    # English Mega Evolution era sets
+    "phantasmal flames",
+    "ascended heroes",
     # Japanese set names — modern high-value sets
     "shiny treasure ex",
     "ruler of the black flame",
@@ -129,7 +133,9 @@ KNOWN_SET_NAME_PATTERNS = [
     "shiny star v",
     "inferno x",
     "mega dream ex",
+    "mega dream attack",     # alt title used in eBay listings for m2a
     # JP Classic deck — detected via the tag-team card name unique to the CLL deck
+    "classic: charizard",    # "Pokemon TCG Classic: Charizard & Ho-Oh ex Deck"
     "charizard & ho-oh ex",
 ]
 
@@ -169,6 +175,9 @@ SET_NAME_NORMALIZATIONS = {
     "stormfront": "stormfront",
     "plasma storm": "plasma_storm",
     "neo destiny": "neo_destiny",
+    # English Mega Evolution era sets
+    "phantasmal flames": "pfl",
+    "ascended heroes": "asc",
     # Japanese set names → their canonical JP set_keys
     "shiny treasure ex": "sv4a",
     "ruler of the black flame": "sv3",
@@ -176,7 +185,9 @@ SET_NAME_NORMALIZATIONS = {
     "shiny star v": "s4a",
     "inferno x": "m2",
     "mega dream ex": "m2a",
+    "mega dream attack": "m2a",      # alt eBay title for MEGA Dream ex (m2a)
     "charizard & ho-oh ex": "cll",
+    "classic: charizard": "cll",     # "Pokemon TCG Classic: Charizard & Ho-Oh ex Deck"
 }
 
 SET_CANONICAL_OVERRIDES = {
