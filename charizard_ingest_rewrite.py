@@ -717,7 +717,7 @@ def get_or_create_set(set_guess: Optional[str], aspect_data: Optional[Dict[str, 
         aspect_data=aspect_data,
     )
 
-    inserted = supabase.table("pokemon_sets").insert(insert_payload).execute()
+    inserted = supabase.table("pokemon_sets").upsert(insert_payload, on_conflict="set_key").execute()
     if inserted.data:
         return inserted.data[0]
 
