@@ -19,7 +19,7 @@ EBAY_CLIENT_SECRET = os.environ["EBAY_CLIENT_SECRET"]
 EBAY_MARKETPLACE_ID = os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US")
 
 WORKER_ID = os.environ.get("WORKER_ID", "github-actions-detail-worker")
-JOB_BATCH_SIZE = int(os.environ.get("JOB_BATCH_SIZE", "25"))
+JOB_BATCH_SIZE = int(os.environ.get("JOB_BATCH_SIZE", "50"))
 MAX_API_CALLS = int(os.environ.get("MAX_API_CALLS", "50"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
 LOCK_STALE_MINUTES = int(os.environ.get("LOCK_STALE_MINUTES", "30"))
@@ -310,11 +310,39 @@ def mark_job_succeeded(job_id: str) -> None:
     )
 
 
-def mark_job_failed(job: Dict[str, Any], error_text: str, delay_seconds: Optional[int] = None) -> None:
+def mark_job_failed(
+    job: Dict[str, Any],
+    error_text: str,
+    delay_seconds: Optional[int] = None,
+    is_rate_limit: bool = False,
+) -> None:
     attempt_count = job.get("attempt_count") or 1
     max_attempts = job.get("max_attempts") or 5
-    terminal = attempt_count >= max_attempts
 
+    # Rate-limit errors are a quota issue, not a job failure. Don't count them
+    # toward max_attempts — instead requeue with the delay and undo the attempt
+    # increment that claim_jobs applied, so the job eventually gets a fair retry.
+    if is_rate_limit:
+        update_payload = {
+            "status": "queued",
+            "locked_at": None,
+            "worker_id": WORKER_ID,
+            "last_error": error_text[:1000],
+            "attempt_count": max(0, attempt_count - 1),  # undo claim increment
+            "updated_at": utc_now_iso(),
+            "available_at": (
+                datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+            ).isoformat() if delay_seconds is not None else utc_now_iso(),
+        }
+        (
+            supabase.table("enrichment_jobs")
+            .update(update_payload)
+            .eq("id", job["id"])
+            .execute()
+        )
+        return
+
+    terminal = attempt_count >= max_attempts
     next_status = "failed" if terminal else "queued"
     update_payload = {
         "status": next_status,
@@ -343,7 +371,7 @@ def mark_job_failed(job: Dict[str, Any], error_text: str, delay_seconds: Optiona
 def requeue_unprocessed_jobs(jobs: List[Dict[str, Any]], start_index: int, reason: str, delay_seconds: int) -> int:
     requeued = 0
     for job in jobs[start_index:]:
-        mark_job_failed(job, reason, delay_seconds=delay_seconds)
+        mark_job_failed(job, reason, delay_seconds=delay_seconds, is_rate_limit=True)
         requeued += 1
     return requeued
 
@@ -416,7 +444,7 @@ def main() -> None:
         except WorkerRateLimitError as exc:
             processed += 1
             failed += 1
-            mark_job_failed(job, exc.message, delay_seconds=exc.sleep_seconds)
+            mark_job_failed(job, exc.message, delay_seconds=exc.sleep_seconds, is_rate_limit=True)
             log(
                 f"Worker-wide rate limit hit on {job['source_listing_id']}; "
                 f"requeueing remaining jobs for {exc.sleep_seconds}s"
