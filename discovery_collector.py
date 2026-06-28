@@ -20,7 +20,7 @@ EBAY_CLIENT_SECRET = os.environ["EBAY_CLIENT_SECRET"]
 EBAY_MARKETPLACE_ID = os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US")
 
 MAX_SEARCH_CALLS_PER_RUN = int(os.environ.get("MAX_SEARCH_CALLS_PER_RUN", "250"))
-PAGE_SIZE = min(int(os.environ.get("DISCOVERY_PAGE_SIZE", "50")), 200)
+PAGE_SIZE = min(int(os.environ.get("DISCOVERY_PAGE_SIZE", "200")), 200)
 MAX_PAGES_PER_PLAN = int(os.environ.get("MAX_PAGES_PER_PLAN", "5"))
 SEARCH_PLAN_LIMIT = int(os.environ.get("SEARCH_PLAN_LIMIT", "50"))
 
@@ -37,7 +37,7 @@ MAX_429_RETRIES = int(os.environ.get("MAX_429_RETRIES", "2"))
 # If a plan's last_success_at is within this many minutes, skip it this run.
 # Prevents back-to-back manual triggers from re-fetching identical data.
 # Set to 0 to disable (default off so existing behavior is unchanged).
-PLAN_COOLDOWN_MINUTES = int(os.environ.get("PLAN_COOLDOWN_MINUTES", "0"))
+PLAN_COOLDOWN_MINUTES = int(os.environ.get("PLAN_COOLDOWN_MINUTES", "120"))
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
@@ -283,6 +283,17 @@ def upsert_market_listing_summaries(source: str, items: List[dict]) -> None:
 
         price = item.get("price") or {}
 
+        # Extract image URL from summary — Browse API includes image.imageUrl in
+        # item_summary/search results. Capturing it here gives near-100% image
+        # coverage without burning detail-fetch API calls. Detail fetches may later
+        # overwrite with the same (or slightly higher-res) URL — that's fine.
+        image = item.get("image") or {}
+        image_url = image.get("imageUrl")
+        if not image_url:
+            thumbnails = item.get("thumbnailImages") or []
+            if thumbnails:
+                image_url = (thumbnails[0] or {}).get("imageUrl")
+
         row = {
             "source": source,
             "source_listing_id": listing_id,
@@ -298,6 +309,7 @@ def upsert_market_listing_summaries(source: str, items: List[dict]) -> None:
             "listing_status": "active",
             "last_seen_at": now_ts,
             "first_seen_at": now_ts,
+            "primary_image_url": image_url,
             "raw_payload": item,
         }
 
