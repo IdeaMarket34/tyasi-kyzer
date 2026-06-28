@@ -123,6 +123,14 @@ KNOWN_SET_NAME_PATTERNS = [
     "stormfront",
     "plasma storm",
     "neo destiny",
+    # English sets missing from original list
+    "darkness ablaze",
+    "celebrations",
+    "classic collection",   # Celebrations: Classic Collection subset → cel
+    "pokemon mew",          # "Pokemon MEW EN" alt title for Scarlet & Violet 151
+    "mew en",               # same
+    "rocket 1st edition",   # EN Team Rocket set titles often omit "team"
+    "pokemon rocket",       # same — "2000 Pokemon Rocket #4 Dark Charizard"
     # English Mega Evolution era sets
     "phantasmal flames",
     "ascended heroes",
@@ -175,6 +183,14 @@ SET_NAME_NORMALIZATIONS = {
     "stormfront": "stormfront",
     "plasma storm": "plasma_storm",
     "neo destiny": "neo_destiny",
+    # English sets missing from original list
+    "darkness ablaze": "daa",
+    "celebrations": "cel",
+    "classic collection": "cel",    # Celebrations: Classic Collection subset; card #4 lives in cel
+    "pokemon mew": "151",           # "Pokemon MEW EN" → Scarlet & Violet 151
+    "mew en": "151",                # same
+    "rocket 1st edition": "tr",     # EN Team Rocket; "team" often omitted in titles
+    "pokemon rocket": "tr",         # same
     # English Mega Evolution era sets
     "phantasmal flames": "pfl",
     "ascended heroes": "asc",
@@ -500,7 +516,8 @@ def detect_set_from_text(t: str) -> Optional[str]:
     # sometimes skip the literal word "promo" entirely ("MEP EN #023"). They
     # already have 161 reference cards under set_key "prsv" - resolve there
     # directly rather than auto-creating a new (likely duplicate) set.
-    if re.search(r"\bmega evolution\b", t) or re.search(r"\bmep\b", t):
+    # "BSP" (Black Star Promo) titles follow the same pattern.
+    if re.search(r"\bmega evolution\b", t) or re.search(r"\bmep\b", t) or re.search(r"\bbsp\b", t):
         return "prsv"
 
     for pattern in sorted(KNOWN_SET_NAME_PATTERNS, key=len, reverse=True):
@@ -510,6 +527,12 @@ def detect_set_from_text(t: str) -> Optional[str]:
             if override:
                 return override["set_key"]
             return normalized
+
+    # "UPC" (Ultra Premium Collection) promo cards route to prsv only as a
+    # last-resort fallback after all named-set patterns have been checked,
+    # to avoid clobbering titles like "UPC Darkness Ablaze Charizard VMAX".
+    if re.search(r"\bupc\b", t):
+        return "prsv"
 
     m = SET_CODE_RE.search(t)
     if m:
