@@ -35,7 +35,7 @@ GRADE_RE = re.compile(r"\b(psa|bgs|cgc|sgc)\s*(\d{1,2}(?:\.\d)?)\b", re.I)
 SET_CODE_RE = re.compile(
     r"\b(sv\d{1,2}[a-z]?|svp|m\d[a-z]?|s\d{1,2}[a-z]?|cll|clk"
     r"|swsh\d*|swsh|sm\d*|sm|xy\d*|xy|bw\d+|bw|dp|pl|neo\d|base|ecard"
-    r"|pfl|asc)\b",
+    r"|pfl|asc|cp6)\b",
     re.I
 )
 
@@ -128,6 +128,7 @@ KNOWN_SET_NAME_PATTERNS = [
     # English sets missing from original list
     "darkness ablaze",
     "celebrations",
+    "celebration set",   # "25th Anniversary Celebration Set Holo" — subset of Celebrations
     "classic collection",   # Celebrations: Classic Collection subset → cel
     "lost origin",
     "pokemon mew",          # "Pokemon MEW EN" alt title for Scarlet & Violet 151
@@ -192,6 +193,7 @@ SET_NAME_NORMALIZATIONS = {
     # English sets missing from original list
     "darkness ablaze": "daa",
     "celebrations": "cel",
+    "celebration set": "cel",    # "25th Anniversary Celebration Set Holo" → same set as celebrations
     "classic collection": "cel",    # Celebrations: Classic Collection subset; card #4 lives in cel
     "lost origin": "lor",
     "pokemon mew": "151",           # "Pokemon MEW EN" → Scarlet & Violet 151
@@ -254,7 +256,7 @@ SET_CANONICAL_OVERRIDES = {
 }
 
 KNOWN_CARD_TOTALS = {
-    "17", "18", "20", "21", "25", "30", "32", "56", "68", "73", "78", "82", "83", "91",
+    "17", "18", "20", "21", "25", "30", "32", "56", "68", "73", "78", "82", "83", "87", "91",
     "94", "95", "97", "100", "101", "102", "105", "106", "107", "108", "110", "111",
     "112", "113", "122", "124", "130", "132", "135", "146", "147", "149", "159", "165",
     "172", "181", "185", "189", "197", "198", "199", "202", "203", "204", "211", "214",
@@ -529,6 +531,15 @@ def detect_set_from_text(t: str) -> Optional[str]:
     # "BSP" (Black Star Promo) titles follow the same pattern.
     if re.search(r"\bmega evolution\b", t) or re.search(r"\bmep\b", t) or re.search(r"\bbsp\b", t):
         return "prsv"
+
+    # JP anniversary sets — language-gated so EN "25th Anniversary Celebration Set"
+    # titles don't get routed here (they have no JP signal and fall through to
+    # the "celebration set" → cel named-pattern check below instead).
+    _is_jp = bool(re.search(r"japanese|\bjpn?\b", t))
+    if _is_jp and re.search(r"\b25th\b", t):
+        return "s8a"
+    if _is_jp and (re.search(r"\b20th\b", t) or re.search(r"\bcp6\b", t)):
+        return "cp6"
 
     for pattern in sorted(KNOWN_SET_NAME_PATTERNS, key=len, reverse=True):
         if pattern in t:
