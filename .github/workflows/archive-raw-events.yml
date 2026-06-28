@@ -9,7 +9,7 @@ on:
       dry_run:
         description: "If true, export but do not delete from Postgres"
         required: false
-        default: "true"
+        default: "false"
 
 jobs:
   archive:
