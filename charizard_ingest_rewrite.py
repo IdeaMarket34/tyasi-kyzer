@@ -27,7 +27,16 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 PROMO_RE = re.compile(r"\b(?:swsh|svp|sm|xy|bw)\s*[-#]?\s*(\d{1,4})\b", re.I)
 FRACTION_RE = re.compile(r"\b([a-z]{0,3}\d{1,4})\s*/\s*([a-z]{0,3}\d{1,4})\b", re.I)
 GRADE_RE = re.compile(r"\b(psa|bgs|cgc|sgc)\s*(\d{1,2}(?:\.\d)?)\b", re.I)
-SET_CODE_RE = re.compile(r"\b(sv\d{1,3}|svp|swsh\d*|swsh|sm\d*|sm|xy\d*|xy|bw\d+|bw|dp|pl|neo\d|base|ecard)\b", re.I)
+# Matches EN and JP set codes found in listing titles.
+# JP codes: sv\d{1,2}[a-z] covers sv4a, sv1a, sv3a etc. (the old sv\d{1,3} only matched sv3 not sv4a).
+# s\d{1,2}[a-z]? covers s4a, s9, s12a (Sword & Shield era JP sets).
+# m\d[a-z]? covers m2 (Inferno X) and m2a (Mega Dream ex).
+# cll/clk are the 2023 JP Classic deck codes.
+SET_CODE_RE = re.compile(
+    r"\b(sv\d{1,2}[a-z]?|svp|m\d[a-z]?|s\d{1,2}[a-z]?|cll|clk"
+    r"|swsh\d*|swsh|sm\d*|sm|xy\d*|xy|bw\d+|bw|dp|pl|neo\d|base|ecard)\b",
+    re.I
+)
 
 # Bare/standalone card-number signals, used as a fallback when there's no
 # "/total" fraction in the title (e.g. promo cards). These are intentionally
@@ -113,6 +122,15 @@ KNOWN_SET_NAME_PATTERNS = [
     "stormfront",
     "plasma storm",
     "neo destiny",
+    # Japanese set names — modern high-value sets
+    "shiny treasure ex",
+    "ruler of the black flame",
+    "vstar universe",
+    "shiny star v",
+    "inferno x",
+    "mega dream ex",
+    # JP Classic deck — detected via the tag-team card name unique to the CLL deck
+    "charizard & ho-oh ex",
 ]
 
 SET_NAME_NORMALIZATIONS = {
@@ -130,8 +148,8 @@ SET_NAME_NORMALIZATIONS = {
     "brilliant stars": "brilliant_stars",
     "burning shadows": "burning_shadows",
     "power keepers": "power_keepers",
-    "star birth": "star_birth",
-    "vmax climax": "vmax_climax",
+    "star birth": "s9",        # JP-only set (EN equivalent: Brilliant Stars)
+    "vmax climax": "s8b",      # JP-only set (no direct EN equivalent)
     "freeze bolt": "freeze_bolt",
     "skyridge": "skyridge",
     "hidden fates": "hidden_fates",
@@ -151,6 +169,14 @@ SET_NAME_NORMALIZATIONS = {
     "stormfront": "stormfront",
     "plasma storm": "plasma_storm",
     "neo destiny": "neo_destiny",
+    # Japanese set names → their canonical JP set_keys
+    "shiny treasure ex": "sv4a",
+    "ruler of the black flame": "sv3",
+    "vstar universe": "s12a",
+    "shiny star v": "s4a",
+    "inferno x": "m2",
+    "mega dream ex": "m2a",
+    "charizard & ho-oh ex": "cll",
 }
 
 SET_CANONICAL_OVERRIDES = {
@@ -196,6 +222,10 @@ KNOWN_CARD_TOTALS = {
     "112", "113", "122", "124", "130", "132", "135", "146", "147", "149", "159", "165",
     "172", "181", "185", "189", "197", "198", "199", "202", "203", "204", "211", "214",
     "215", "217", "230", "234", "236", "248", "307",
+    # JP-specific set totals
+    "80",   # M2 Inferno X
+    "190",  # sv4a Shiny Treasure ex, s4a Shiny Star V
+    "193",  # M2a Mega Dream ex
 }
 
 QUERIES = [
@@ -478,7 +508,8 @@ def detect_set_from_text(t: str) -> Optional[str]:
 
 
 def extract_language(t: str) -> str:
-    if "japanese" in t or re.search(r"\bjp\b", t):
+    # "jpn" is extremely common in eBay titles ("JPN", "Jpn") — catch it alongside "jp".
+    if "japanese" in t or re.search(r"\bjpn?\b", t):
         return "ja"
     return "en"
 
@@ -646,12 +677,17 @@ def infer_set_insert_payload(set_code: str, aspect_data: Optional[Dict[str, Opti
         } - {""}
     )
 
+    # Infer language from the set_key: JP-format codes start with sv\d, s\d, m\d, cll, clk.
+    # This prevents auto-created JP sets from being stored with language='en'.
+    _jp_key_re = re.compile(r'^(sv\d|s\d|m\d|cll|clk)', re.I)
+    language = "ja" if _jp_key_re.match(set_key) else "en"
+
     return {
         "set_key": set_key,
         "set_name": set_name,
         "series_name": None,
         "set_code": None,
-        "language": "en",
+        "language": language,
         "release_date": None,
         "aliases": ",".join(aliases),
     }
