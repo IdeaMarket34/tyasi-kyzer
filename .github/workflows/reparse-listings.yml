@@ -1,0 +1,35 @@
+name: Reparse Listings
+
+# Manual trigger only — run this any time you've updated the parser or catalog
+# and want to backfill all stored listings.
+on:
+  workflow_dispatch:
+
+jobs:
+  reparse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # 2-hour ceiling; fast v2 should finish in ~20 min
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run reparse (apply mode)
+        run: python reparse_listings.py --apply
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          EBAY_CLIENT_ID:       ${{ secrets.EBAY_CLIENT_ID }}
+          EBAY_CLIENT_SECRET:   ${{ secrets.EBAY_CLIENT_SECRET }}
+          # Optional — only needed if you use a paid pokemontcg.io key
+          # POKEMONTCG_API_KEY: ${{ secrets.POKEMONTCG_API_KEY }}
