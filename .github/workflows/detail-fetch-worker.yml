@@ -1,8 +1,8 @@
 name: detail-fetch
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
+  # Scheduled by pg_cron in Supabase via trigger_github_workflow().
+  # Do NOT add a schedule: block here — pg_cron is the sole trigger.
   workflow_dispatch:
 
 jobs:

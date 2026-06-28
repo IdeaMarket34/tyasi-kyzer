@@ -1,9 +1,9 @@
 name: Sold Comps
 
 on:
+  # Scheduled by pg_cron in Supabase via trigger_github_workflow().
+  # Do NOT add a schedule: block here — pg_cron is the sole trigger.
   workflow_dispatch:
-  schedule:
-    - cron: "41 * * * *"
 
 concurrency:
   group: sold-comps
