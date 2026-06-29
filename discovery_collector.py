@@ -301,6 +301,7 @@ def upsert_market_listing_summaries(source: str, items: List[dict]) -> None:
             if thumbnails:
                 image_url = (thumbnails[0] or {}).get("imageUrl")
 
+        seller = item.get("seller") or {}
         row = {
             "source": source,
             "source_listing_id": listing_id,
@@ -317,6 +318,7 @@ def upsert_market_listing_summaries(source: str, items: List[dict]) -> None:
             "last_seen_at": now_ts,
             "first_seen_at": now_ts,
             "primary_image_url": image_url,
+            "seller_name": seller.get("username"),
             "raw_payload": item,
         }
 
