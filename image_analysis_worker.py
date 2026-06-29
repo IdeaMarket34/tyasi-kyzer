@@ -44,7 +44,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 BATCH_SIZE = int(os.environ.get("IMAGE_BATCH_SIZE", "150"))
 IMAGE_TIMEOUT = int(os.environ.get("IMAGE_TIMEOUT_SECONDS", "10"))
 
