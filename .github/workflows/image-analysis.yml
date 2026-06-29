@@ -1,0 +1,35 @@
+name: image-analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: "Images to process per run (default: 150)"
+        required: false
+        default: "150"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Tesseract OCR
+        run: sudo apt-get install -y tesseract-ocr
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install supabase requests Pillow pytesseract imagehash
+
+      - name: Run image analysis worker
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          IMAGE_BATCH_SIZE: ${{ github.event.inputs.batch_size || '150' }}
+        run: python image_analysis_worker.py
