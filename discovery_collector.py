@@ -39,6 +39,13 @@ MAX_429_RETRIES = int(os.environ.get("MAX_429_RETRIES", "2"))
 # Set to 0 to disable (default off so existing behavior is unchanged).
 PLAN_COOLDOWN_MINUTES = int(os.environ.get("PLAN_COOLDOWN_MINUTES", "120"))
 
+# Minimum eBay seller feedback score required to ingest a listing.
+# Listings from sellers below this threshold are dropped at collection time —
+# they never enter raw_market_events, enrichment_jobs, or market_listings.
+# 780 zero-feedback and 479 1–4-feedback listings were found in session #26.
+# Set to 0 to disable filtering entirely.
+MIN_SELLER_FEEDBACK_SCORE = int(os.environ.get("MIN_SELLER_FEEDBACK_SCORE", "5"))
+
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 EBAY_ACCESS_TOKEN_CACHE: Optional[str] = None
@@ -340,12 +347,30 @@ def plan_is_on_cooldown(plan: dict) -> bool:
         return False
 
 
-def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int]:
+def seller_passes_filter(item: dict) -> bool:
+    """Return True if the listing's seller meets the minimum feedback threshold.
+
+    Checks item["seller"]["feedbackScore"] from the Browse API summary payload.
+    Items with no seller block or missing feedbackScore are treated as failing
+    (conservative — unknown sellers are treated like zero-feedback sellers).
+    Pass MIN_SELLER_FEEDBACK_SCORE=0 to disable entirely.
+    """
+    if MIN_SELLER_FEEDBACK_SCORE <= 0:
+        return True
+    seller = item.get("seller") or {}
+    score = seller.get("feedbackScore")
+    if score is None:
+        return False
+    return int(score) >= MIN_SELLER_FEEDBACK_SCORE
+
+
+def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int, int]:
     search_run_id = create_search_run(plan)
     api_calls_used = 0
     total_results = 0
     unique_count = 0
     duplicate_count = 0
+    filtered_count = 0
     all_summary_events: List[dict] = []
     all_items: List[dict] = []
     queued_listing_ids: List[str] = []
@@ -379,6 +404,18 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int]
             if not items:
                 log(f"No items returned for plan {plan['id']} at offset {offset}")
                 break
+
+            # Drop listings from low-feedback / brand-new sellers before any
+            # processing — they never reach raw_market_events or market_listings.
+            pre_filter = len(items)
+            items = [item for item in items if seller_passes_filter(item)]
+            page_filtered = pre_filter - len(items)
+            if page_filtered:
+                log(
+                    f"  Seller filter: dropped {page_filtered}/{pre_filter} items "
+                    f"(min_feedback={MIN_SELLER_FEEDBACK_SCORE}, page {page_index})"
+                )
+            filtered_count += page_filtered
 
             total_results += len(items)
             all_items.extend(items)
@@ -440,6 +477,7 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int]
                     "result_count": total_results,
                     "unique_item_count": unique_count,
                     "duplicate_item_count": duplicate_count,
+                    "filtered_seller_count": filtered_count,
                     "error_count": 0,
                 },
             )
@@ -449,9 +487,10 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int]
 
         log(
             f"Plan {plan['id']} {final_status}: calls={api_calls_used} "
-            f"results={total_results} unique={unique_count} queued={queued_count}"
+            f"results={total_results} unique={unique_count} "
+            f"filtered_sellers={filtered_count} queued={queued_count}"
         )
-        return api_calls_used, total_results, unique_count, queued_count
+        return api_calls_used, total_results, unique_count, queued_count, filtered_count
 
     except Exception as e:
         log(f"Plan failed {plan['id']}: {e}")
@@ -468,7 +507,7 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int]
                     "error_message": str(e),
                 },
             )
-        return api_calls_used, total_results, unique_count, 0
+        return api_calls_used, total_results, unique_count, 0, 0
 
 
 def main() -> None:
@@ -487,6 +526,7 @@ def main() -> None:
     total_results = 0
     total_unique = 0
     total_queued = 0
+    total_filtered = 0
     plans_skipped = 0
 
     for plan in plans:
@@ -500,12 +540,13 @@ def main() -> None:
             plans_skipped += 1
             continue
 
-        calls_used, result_count, unique_count, queued_count = process_plan(plan, remaining_budget)
+        calls_used, result_count, unique_count, queued_count, filtered_count = process_plan(plan, remaining_budget)
         remaining_budget -= calls_used
         total_calls += calls_used
         total_results += result_count
         total_unique += unique_count
         total_queued += queued_count
+        total_filtered += filtered_count
 
     log(
         json.dumps(
@@ -515,6 +556,7 @@ def main() -> None:
                 "api_calls_used": total_calls,
                 "results_seen": total_results,
                 "unique_or_changed": total_unique,
+                "seller_filtered": total_filtered,
                 "detail_jobs_queued": total_queued,
                 "remaining_budget": remaining_budget,
             }
