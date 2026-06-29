@@ -24,6 +24,11 @@ MAX_API_CALLS = int(os.environ.get("MAX_API_CALLS", "50"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
 LOCK_STALE_MINUTES = int(os.environ.get("LOCK_STALE_MINUTES", "30"))
 WORKER_RATE_LIMIT_BACKOFF_SECONDS = int(os.environ.get("WORKER_RATE_LIMIT_BACKOFF_SECONDS", "300"))
+# Hard ceiling on detail-fetch API calls per calendar day (UTC). The worker exits
+# early if this many jobs have already been completed today, preventing runaway
+# consumption if the queue fills unexpectedly. Sized to leave headroom for
+# discovery (~2,300/day) while staying well under the 5,000/day eBay limit.
+DAILY_DETAIL_BUDGET = int(os.environ.get("DAILY_DETAIL_BUDGET", "1500"))
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
@@ -391,8 +396,34 @@ def process_job(access_token: str, job: Dict[str, Any]) -> Tuple[bool, str]:
     return True, source_listing_id
 
 
+def count_todays_completed_jobs() -> int:
+    """Return the number of detail_fetch jobs completed so far today (UTC)."""
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).isoformat()
+    result = (
+        supabase.table("enrichment_jobs")
+        .select("id", count="exact")
+        .eq("job_type", "detail_fetch")
+        .eq("status", "done")
+        .gte("updated_at", today_start)
+        .execute()
+    )
+    return result.count or 0
+
+
 def main() -> None:
     log("Starting detail fetch worker...")
+
+    todays_count = count_todays_completed_jobs()
+    log(f"Daily budget check: {todays_count}/{DAILY_DETAIL_BUDGET} detail jobs completed today")
+    if todays_count >= DAILY_DETAIL_BUDGET:
+        log(
+            f"Daily detail budget exhausted ({todays_count}/{DAILY_DETAIL_BUDGET}). "
+            "Exiting to protect eBay API quota. Will resume after UTC midnight reset."
+        )
+        return
+
     released = release_stale_running_jobs()
     access_token = get_ebay_access_token()
 
