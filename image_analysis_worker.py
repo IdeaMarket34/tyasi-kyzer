@@ -160,10 +160,15 @@ def detect_junk_signals(w: int, h: int) -> list[str]:
 # ── Card number comparison ────────────────────────────────────────────────────
 
 def normalize_card_number(raw: str | None) -> str | None:
-    """Strip leading zeros for comparison: '025' → '25', 'TG01' → None."""
+    """
+    Strip leading zeros for apples-to-apples comparison.
+    Handles both OCR format ("025/198" → "25") and parser format ("025" → "25").
+    Returns None for non-numeric identifiers like "TG01" or "SWSH001".
+    """
     if not raw:
         return None
-    m = CARD_NUMBER_RE.match(raw)
+    # Extract the leading numeric portion — works for "025/198", "025", "25"
+    m = re.match(r'^(\d+)', raw.strip())
     if not m:
         return None
     try:
@@ -237,7 +242,7 @@ def write_result(parse_id: int, analysis: dict) -> None:
     Also sets is_junk=true and junk_reason if junk was detected.
     Never clears an existing is_junk=true set by the title parser.
     """
-    update: dict = {"image_analysis": json.dumps(analysis)}
+    update: dict = {"image_analysis": analysis}  # pass dict; Supabase client serializes to jsonb
     if analysis.get("junk_detected"):
         signals = ",".join(analysis.get("junk_signals", []))
         update["is_junk"] = True
