@@ -112,6 +112,7 @@ JUNK_PATTERNS = [
     r"\bbinder\b",
     r"\btin\b",
     r"\bgold plated\b",   # novelty/non-genuine cards, not real TCG cards
+    r"\bmystery grab\b",   # mystery-grab/grab-bag listings, not a specific card
 ]
 
 KNOWN_SET_NAME_PATTERNS = [
@@ -658,6 +659,39 @@ def extract_variant(t: str) -> Optional[str]:
             return value
     return None
 
+# Phrases where "charizard" appears in a title but does NOT refer to the
+# actual card being sold — instead it's a stamp/seal applied to a different
+# card, or a deck/box/set product name that happens to be named after
+# Charizard while the individual card listed is something else. Matching on
+# a bare "charizard" substring anywhere in the title was sweeping these in
+# as false positives (session #39 finding — confirmed against real titles
+# like "Charmeleon - (#30 Charizard Stamped) ... Battle Academy" and
+# "Chinese Ponyta 004/032 CLL Classic Box Charizard Deck Holo").
+#
+# Each pattern is stripped from the title before checking for a genuine
+# Charizard mention. This is deliberately conservative: a real Charizard
+# card whose title *also* contains one of these phrases (e.g. "Charizard
+# GX - (#60 Charizard Stamped) 009/068 Battle Academy") still has its own
+# leading "charizard" survive the strip, so it's still correctly matched.
+# The "classic: charizard" pattern carries a negative lookahead so it does
+# NOT strip the genuine CLL tag-team deck name "Classic: Charizard & Ho-Oh
+# ex Deck", which is itself a real Charizard card.
+CHARIZARD_QUALIFIER_RE_LIST = [
+    re.compile(r"\bcharizard[\s-]+stamped\b", re.I),
+    re.compile(r"\bcharizard\s+(?:half\s+)?deck\b", re.I),
+    re.compile(r"\bcharizard\s+box\b", re.I),
+    re.compile(r"\bvs\.?\s+charizard\b", re.I),
+    re.compile(r"\bclassic:?\s*charizard\b(?!\s*&?\s*ho-?oh)", re.I),
+]
+
+
+def strip_charizard_qualifiers(t: str) -> str:
+    cleaned = t
+    for pattern in CHARIZARD_QUALIFIER_RE_LIST:
+        cleaned = pattern.sub(" ", cleaned)
+    return cleaned
+
+
 def has_strong_single_card_signal(parsed, title_norm: str) -> bool:
     if parsed.promo_code:
         return True
@@ -696,7 +730,13 @@ def parse_listing_title(title: str) -> ParsedTitle:
 
     grade_company, grade_value = extract_grade(t)
 
-    pokemon_name = "charizard" if "charizard" in t else None
+    # Strip stamp/deck/box/shortened-set qualifier phrases before checking
+    # for a genuine Charizard mention — see CHARIZARD_QUALIFIER_RE_LIST above.
+    # Session #39: bare substring matching was sweeping in other Pokemon's
+    # listings whenever "Charizard" appeared anywhere in the title (a promo
+    # stamp callout, a deck/box product name, etc.) even though the card
+    # actually being sold was something else entirely.
+    pokemon_name = "charizard" if "charizard" in strip_charizard_qualifiers(t) else None
 
     # If the title doesn't mention "charizard" at all, the parser already
     # correctly determined this isn't a Charizard listing (match_reference_card
