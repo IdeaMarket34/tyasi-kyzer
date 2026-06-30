@@ -87,6 +87,20 @@ JUNK_PATTERNS = [
     r"\bpoker playing card\b",
     r"\bchoose your\b",   # multi-card lot listings ("choose your card/exact card/mini set")
     r"\bfanart\b",        # non-TCG fan-made cards
+    # Sealed / non-individual-card products — these can never match a single
+    # pokemon_cards row, so they were piling up in the unmatched-non-junk
+    # bucket instead of being filtered out. Added session #27.
+    r"\belite trainer box\b",
+    r"\bbooster box\b",
+    r"\bbooster pack\b",
+    r"\bbooster bundle\b",
+    r"\bdisplay case\b",
+    r"\bsealed box\b",
+    r"\bcollection box\b",
+    r"\bportfolio\b",
+    r"\bbinder\b",
+    r"\btin\b",
+    r"\bgold plated\b",   # novelty/non-genuine cards, not real TCG cards
 ]
 
 KNOWN_SET_NAME_PATTERNS = [
@@ -405,6 +419,33 @@ def extract_fraction_fields(value: Optional[str]) -> Tuple[Optional[str], Option
     return cleaned, None, None, None
 
 
+def extract_card_number_aspect(value: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Like extract_fraction_fields(), but for eBay's structured "Card Number"
+    aspect specifically.
+
+    That aspect is usually a bare promo/card number with no "/total"
+    delimiter (e.g. "030"), not a real fraction. Running it through
+    extract_fraction_fields()'s compact-token fallback incorrectly split
+    bare 3-digit numbers into a fake numerator/total pair whenever the last
+    2-3 digits happened to match a known set total — e.g. "030" -> "0"/"30"
+    instead of being read as plain card #30. That fallback exists to handle
+    ambiguous *title* text; title parsing already avoids calling it (see
+    parse_listing_title), but the aspect-data path called
+    extract_fraction_fields() directly and reintroduced the same bug.
+    Fixed session #27 — only run the fraction splitter when a literal "/"
+    is actually present in the aspect value; otherwise treat the whole
+    value as a single bare card number.
+    """
+    if not value:
+        return None, None, None, None
+    if "/" in value:
+        return extract_fraction_fields(value)
+    cleaned = value.strip()
+    if not cleaned:
+        return None, None, None, None
+    return cleaned, _normalize_card_part(cleaned), None, None
+
+
 def extract_bare_card_number(t: str) -> Optional[str]:
     """Fallback card-number extraction for titles with no '/total' fraction.
 
@@ -542,6 +583,21 @@ def detect_set_from_text(t: str) -> Optional[str]:
         return "cp6"
 
     for pattern in sorted(KNOWN_SET_NAME_PATTERNS, key=len, reverse=True):
+        if pattern == "151":
+            # "151" as a known set name (English Scarlet & Violet "151") was
+            # matching as a blind substring, which also fires on any card
+            # number written as "X/151" where 151 is just that card's total
+            # count — e.g. a Chinese CSM1aC Charizard GX numbered "004/151"
+            # was misidentified as the English 151 set purely because its
+            # total happened to be 151. Require it not be the right side of
+            # a "/151" fraction. Fixed session #27.
+            if re.search(r"(?<!/)\b151\b", t):
+                normalized = SET_NAME_NORMALIZATIONS.get(pattern, slugify_set_name(pattern))
+                override = SET_CANONICAL_OVERRIDES.get(normalized)
+                if override:
+                    return override["set_key"]
+                return normalized
+            continue
         if pattern in t:
             normalized = SET_NAME_NORMALIZATIONS.get(pattern, slugify_set_name(pattern))
             override = SET_CANONICAL_OVERRIDES.get(normalized)
@@ -624,10 +680,24 @@ def parse_listing_title(title: str) -> ParsedTitle:
             card_norm = bare
 
     grade_company, grade_value = extract_grade(t)
+
+    pokemon_name = "charizard" if "charizard" in t else None
+
+    # If the title doesn't mention "charizard" at all, the parser already
+    # correctly determined this isn't a Charizard listing (match_reference_card
+    # skips matching when pokemon_name is None) — but nothing was marking it
+    # junk, so these piled up forever in the "unmatched, non-junk" bucket
+    # instead of being filtered out. Preserve a more specific junk_reason if
+    # one was already set (e.g. "lot", "proxy") rather than overwriting it.
+    # Added session #27.
+    if not pokemon_name and not is_junk:
+        is_junk = True
+        junk_reason = "non_charizard"
+
     return ParsedTitle(
         raw_title=title,
         normalized_title=t,
-        pokemon_name="charizard" if "charizard" in t else None,
+        pokemon_name=pokemon_name,
         set_code=detect_set_from_text(t),
         card_number_guess=card_raw,
         card_number=card_norm,
@@ -840,7 +910,7 @@ def match_reference_card(parsed: ParsedTitle, aspects: Optional[Dict[str, Option
         set_code = detect_set_from_text(normalize_text(aspects["set_name"])) or normalize_set_key(aspects["set_name"])
 
     if (not card_num or not card_total) and aspects.get("card_number_raw"):
-        _, num, total, _ = extract_fraction_fields(aspects["card_number_raw"])
+        _, num, total, _ = extract_card_number_aspect(aspects["card_number_raw"])
         if num:
             card_num = num
         if total:
@@ -1182,7 +1252,7 @@ def map_item_to_bundle(item: dict, detail: Optional[dict] = None) -> dict:
             parsed.set_code = normalize_set_key(aspect_data["set_name"])
 
     if aspect_data.get("card_number_raw"):
-        raw, num, total, fraction = extract_fraction_fields(aspect_data["card_number_raw"])
+        raw, num, total, fraction = extract_card_number_aspect(aspect_data["card_number_raw"])
         if raw:
             parsed.card_number_guess = raw
         if num:
