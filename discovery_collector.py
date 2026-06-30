@@ -39,6 +39,22 @@ MAX_429_RETRIES = int(os.environ.get("MAX_429_RETRIES", "2"))
 # Set to 0 to disable (default off so existing behavior is unchanged).
 PLAN_COOLDOWN_MINUTES = int(os.environ.get("PLAN_COOLDOWN_MINUTES", "120"))
 
+# Shared, cross-script daily ceiling on REAL eBay API call attempts — same
+# table/function used by detail_fetch_worker.py and backfill_sold_listings.py
+# (ebay_api_call_log / ebay_calls_today()). See session #40 notes: this
+# script's own MAX_SEARCH_CALLS_PER_RUN budget only ever knew about itself,
+# not about what detail_fetch_worker or backfill were doing concurrently.
+EBAY_SHARED_DAILY_CAP = int(os.environ.get("EBAY_SHARED_DAILY_CAP", "4500"))
+SCRIPT_NAME = os.environ.get("EBAY_CALL_SCRIPT_NAME", "discovery_collector")
+
+
+class SharedBudgetExceeded(Exception):
+    """Raised before making another real HTTP call to eBay once the shared
+    cross-script daily budget has been reached."""
+    def __init__(self, calls_today: int) -> None:
+        super().__init__(f"shared_ebay_budget_exceeded:{calls_today}/{EBAY_SHARED_DAILY_CAP}")
+        self.calls_today = calls_today
+
 # Minimum eBay seller feedback score required to ingest a listing.
 # Listings from sellers below this threshold are dropped at collection time —
 # they never enter raw_market_events, enrichment_jobs, or market_listings.
@@ -103,6 +119,33 @@ def get_headers() -> Dict[str, str]:
         "Accept": "application/json",
         "X-EBAY-C-MARKETPLACE-ID": EBAY_MARKETPLACE_ID,
     }
+
+
+def check_shared_ebay_budget() -> int:
+    """Read-only check against the shared cross-script daily call counter.
+    Call before every real HTTP attempt to eBay. Raises SharedBudgetExceeded
+    if at/over the cap."""
+    result = supabase.rpc("ebay_calls_today", {}).execute()
+    calls_today = result.data if isinstance(result.data, int) else int(result.data)
+    if calls_today >= EBAY_SHARED_DAILY_CAP:
+        raise SharedBudgetExceeded(calls_today)
+    return calls_today
+
+
+def log_ebay_call(outcome: str, status_code: Optional[int] = None) -> None:
+    """Log a real eBay API call attempt (any outcome) to the shared
+    cross-script log table — fixes session #40's undercounting, where 429
+    retries were real calls that never got tallied anywhere."""
+    try:
+        supabase.table("ebay_api_call_log").insert(
+            {
+                "script": SCRIPT_NAME,
+                "outcome": outcome,
+                "status_code": status_code,
+            }
+        ).execute()
+    except Exception as exc:
+        log(f"warning: failed to log ebay call to shared budget table: {exc}")
 
 
 def load_active_search_plans(limit: int = SEARCH_PLAN_LIMIT) -> List[dict]:
@@ -189,6 +232,11 @@ def search_browse(
 
     for attempt in range(1, MAX_429_RETRIES + 1):
         log(f"Browse search attempt {attempt}/{MAX_429_RETRIES}: q={query_text!r} offset={offset}")
+        # Shared cross-script budget check — see session #40 notes. This
+        # script's own per-run MAX_SEARCH_CALLS_PER_RUN budget never knew
+        # about detail_fetch_worker's or backfill_sold_listings' concurrent
+        # eBay call volume.
+        check_shared_ebay_budget()
         response = HTTP_SESSION.get(
             "https://api.ebay.com/buy/browse/v1/item_summary/search",
             headers=get_headers(),
@@ -203,6 +251,7 @@ def search_browse(
             log(f"  eBay rate-limit: {rl_remaining}/{rl_limit} remaining")
 
         if response.status_code == 429:
+            log_ebay_call("429", status_code=429)
             retry_after = response.headers.get("Retry-After")
             wait_s = int(retry_after) if retry_after else min(2 ** attempt, 30)
             last_error = f"429 rate limit (attempt {attempt}/{MAX_429_RETRIES}); waiting {wait_s}s"
@@ -211,11 +260,14 @@ def search_browse(
             continue
 
         if response.status_code >= 400:
+            log_ebay_call("4xx_5xx", status_code=response.status_code)
             body_preview = response.text[:1000]
             raise RuntimeError(
                 f"Browse search failed ({response.status_code}) for query={query_text} "
                 f"offset={offset} response={body_preview}"
             )
+
+        log_ebay_call("success", status_code=response.status_code)
 
         # Successful response — apply inter-request pacing before returning
         if INTER_REQUEST_DELAY_S > 0:
@@ -413,6 +465,10 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int,
                 log(f"Rate limit abort on plan {plan['id']} page {page_index}: {e}")
                 rate_limited = True
                 break  # Save whatever we collected so far; don't propagate
+            except SharedBudgetExceeded as e:
+                log(f"Shared eBay daily budget reached on plan {plan['id']} page {page_index}: {e}")
+                rate_limited = True
+                break  # Same clean partial-stop as RateLimitAbort — save and move on
 
             api_calls_used += calls_used
 
