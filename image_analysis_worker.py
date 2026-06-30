@@ -58,7 +58,15 @@ LANDSCAPE_RATIO = 1.3    # w/h > this → landscape → likely bulk lot or scene
 # first production run. Two tiers: auto-accept (confident enough to write
 # matched_card_id directly) vs. candidate (queued for manual review).
 PHASH_AUTO_ACCEPT_MAX_DISTANCE = 10
-PHASH_CANDIDATE_MAX_DISTANCE = 18
+# Tightened 18 -> 14 in the session following #31's card_number cross-check
+# rollout: production data showed distance 16-18 conflicting with the
+# parser's card_number 94-100% of the time (3/3 at distance 16, 15/16 at
+# distance 18), confirming that band is mostly noise rather than real
+# matches. No card_number-agreement data exists yet for distance 12-14
+# specifically (no candidates landed there in this run), so this cut is
+# evidence-backed only down to 14 — not a further blind guess. Revisit again
+# once more volume lands in the 12-14 band.
+PHASH_CANDIDATE_MAX_DISTANCE = 14
 
 # OCR: card numbers appear in bottom strip as "025/198", "TG01/TG30", etc.
 CARD_NUMBER_RE = re.compile(r'\b(\d{1,3})\s*/\s*(\d{1,3}[A-Z]*)\b')
