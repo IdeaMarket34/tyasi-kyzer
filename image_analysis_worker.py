@@ -137,7 +137,7 @@ def find_best_phash_match(phash_hex: str, reference_library: list[dict]) -> dict
 
     for ref in reference_library:
         ref_hash = imagehash.hex_to_hash(ref["phash"])
-        distance = query_hash - ref_hash  # imagehash overloads `-` as hamming distance
+        distance = int(query_hash - ref_hash)  # imagehash overloads `-` as hamming distance; cast numpy.int64 -> int for JSON serialization
         if best_distance is None or distance < best_distance:
             best_distance = distance
             best = ref
