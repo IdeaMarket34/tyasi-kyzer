@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       batch_size:
-        description: "Images to process per run (default: 150)"
+        description: "Images to process per run (default: 400 -- temporarily bumped from 150 in session #32 to work down the image-analysis backlog)"
         required: false
-        default: "150"
+        default: "400"
 
 jobs:
   run:
@@ -31,5 +31,5 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          IMAGE_BATCH_SIZE: ${{ github.event.inputs.batch_size || '150' }}
+          IMAGE_BATCH_SIZE: ${{ github.event.inputs.batch_size || '400' }}
         run: python image_analysis_worker.py

@@ -347,6 +347,23 @@ def process_row(row: dict, reference_library: list[dict]) -> dict:
                 "parser_card_number": row.get("card_number"),
             }
 
+            # TEMP (session #32 follow-up): sampling/logging check for the
+            # distance-14 ceiling change. Logs every candidate landing in the
+            # 12-18 band so we can confirm 15-18 are correctly falling to
+            # no_match and gather the first card_number-agreement data for
+            # the still-unvalidated 12-14 band (see priority #4 / #3 in
+            # PROJECT_STATUS). Remove once the ceiling is confirmed and the
+            # 12-14 band has been re-evaluated.
+            if 12 <= match["distance"] <= 18:
+                log.info(
+                    f"PHASH_BAND_CHECK parse_id={row['id']} "
+                    f"distance={match['distance']} tier={tier} "
+                    f"card_number_agreement={agreement} "
+                    f"reference_card_number={match.get('card_number')!r} "
+                    f"parser_card_number={row.get('card_number')!r} "
+                    f"card_key={match['card_key']!r}"
+                )
+
     return analysis
 
 
@@ -473,6 +490,7 @@ def main() -> None:
 
     confirmed = conflicts = junk_flagged = errors = 0
     phash_auto_accepted = phash_candidates = 0
+    phash_band_12_18 = 0  # TEMP (session #32 follow-up) — see PHASH_BAND_CHECK log lines
 
     for row in batch:
         parse_id = row["id"]
@@ -495,6 +513,10 @@ def main() -> None:
             elif phash_tier == "candidate":
                 phash_candidates += 1
 
+            phash_distance = (analysis.get("phash_match") or {}).get("distance")
+            if phash_distance is not None and 12 <= phash_distance <= 18:
+                phash_band_12_18 += 1
+
             time.sleep(0.05)  # light throttle on image CDN
 
         except Exception as e:
@@ -506,6 +528,7 @@ def main() -> None:
         f"junk_flagged={junk_flagged} errors={errors} "
         f"phash_auto_accepted={phash_auto_accepted} "
         f"phash_candidates={phash_candidates} "
+        f"phash_band_12_18={phash_band_12_18} "
         f"total={len(batch)}"
     )
 
