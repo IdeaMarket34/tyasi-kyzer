@@ -24,11 +24,62 @@ MAX_API_CALLS = int(os.environ.get("MAX_API_CALLS", "50"))
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "30"))
 LOCK_STALE_MINUTES = int(os.environ.get("LOCK_STALE_MINUTES", "30"))
 WORKER_RATE_LIMIT_BACKOFF_SECONDS = int(os.environ.get("WORKER_RATE_LIMIT_BACKOFF_SECONDS", "300"))
-# Hard ceiling on detail-fetch API calls per calendar day (UTC). The worker exits
-# early if this many jobs have already been completed today, preventing runaway
-# consumption if the queue fills unexpectedly. Sized to leave headroom for
-# discovery (~2,300/day) while staying well under the 5,000/day eBay limit.
+# Legacy per-script daily ceiling. Superseded by EBAY_SHARED_DAILY_CAP (see
+# below), which is checked against actual eBay-side call volume across ALL
+# scripts (discovery_collector.py, detail_fetch_worker.py,
+# backfill_sold_listings.py) via the ebay_api_call_log table. Kept around as
+# a secondary per-script sanity ceiling, but no longer the primary guard —
+# session #40 found two scripts independently enforcing ~1500/day with zero
+# awareness of each other or of real eBay-side 429s, which is how the
+# rate-limit incident happened despite both "budgets" individually looking fine.
 DAILY_DETAIL_BUDGET = int(os.environ.get("DAILY_DETAIL_BUDGET", "1500"))
+
+# Shared, cross-script daily ceiling on REAL eBay API call attempts (every
+# attempt, including ones that 429/500/timeout — not just successful jobs).
+# Set comfortably under eBay's documented 5,000/day Browse API limit to leave
+# margin for undercounting/timing races between concurrently-running scripts.
+EBAY_SHARED_DAILY_CAP = int(os.environ.get("EBAY_SHARED_DAILY_CAP", "4500"))
+SCRIPT_NAME = os.environ.get("EBAY_CALL_SCRIPT_NAME", "detail_fetch_worker")
+
+
+class SharedBudgetExceeded(Exception):
+    """Raised when the shared cross-script eBay call budget (see
+    ebay_api_call_log / ebay_calls_today()) has been reached, BEFORE making
+    another real HTTP call to eBay. Distinct from WorkerRateLimitError, which
+    fires only after eBay itself has already returned a 429."""
+    def __init__(self, calls_today: int) -> None:
+        super().__init__(f"shared_ebay_budget_exceeded:{calls_today}/{EBAY_SHARED_DAILY_CAP}")
+        self.calls_today = calls_today
+
+
+def check_shared_ebay_budget() -> int:
+    """Read-only check against the shared daily call counter. Call this
+    immediately before every real HTTP attempt to eBay, in every script that
+    talks to eBay. Raises SharedBudgetExceeded if at/over the cap."""
+    result = supabase.rpc("ebay_calls_today", {}).execute()
+    calls_today = result.data if isinstance(result.data, int) else int(result.data)
+    if calls_today >= EBAY_SHARED_DAILY_CAP:
+        raise SharedBudgetExceeded(calls_today)
+    return calls_today
+
+
+def log_ebay_call(outcome: str, status_code: Optional[int] = None, source_listing_id: Optional[str] = None) -> None:
+    """Log a real eBay API call attempt (any outcome) to the shared cross-script
+    log. Call this AFTER every real HTTP attempt, success or failure alike —
+    this is what fixes the undercounting from session #40 (retries on
+    429/500/timeout were real calls that never got tallied anywhere)."""
+    try:
+        supabase.table("ebay_api_call_log").insert(
+            {
+                "script": SCRIPT_NAME,
+                "outcome": outcome,
+                "status_code": status_code,
+                "source_listing_id": source_listing_id,
+            }
+        ).execute()
+    except Exception as exc:
+        # Logging failures should never take down the actual work.
+        log(f"warning: failed to log ebay call to shared budget table: {exc}")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
@@ -191,12 +242,37 @@ def fetch_item_detail(access_token: str, source_listing_id: str) -> Dict[str, An
     last_retry_after: Optional[int] = None
 
     for attempt in range(1, max_attempts + 1):
-        response = HTTP_SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        # Check the SHARED cross-script budget before making the call, not
+        # just this script's own counter. This is what was missing in
+        # session #40 — detail_fetch_worker and backfill_sold_listings each
+        # had their own ~1500/day ceiling, completely blind to each other and
+        # to discovery_collector's volume, so neither one individually
+        # tripping its own limit prevented the combined real eBay call volume
+        # from running into trouble.
+        check_shared_ebay_budget()
+
+        try:
+            response = HTTP_SESSION.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            # Network-level failures (read timeout, connection reset, DNS
+            # blip) never reach the status-code checks below, so they need
+            # their own retry path. Previously these propagated immediately
+            # on the first occurrence with no retry at all (session #39 —
+            # found when the backfill script hit a transient read timeout
+            # and the whole run died on it instead of retrying).
+            log_ebay_call("network_error", source_listing_id=source_listing_id)
+            if attempt == max_attempts:
+                raise RuntimeError(f"network_error_after_retries: {exc}")
+            log(f"Network error for {source_listing_id}: {exc}; attempt {attempt}/{max_attempts}; retrying in {delay}s")
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+            continue
 
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After")
             sleep_for = int(retry_after) if retry_after and retry_after.isdigit() else delay
             last_retry_after = sleep_for
+            log_ebay_call("429", status_code=429, source_listing_id=source_listing_id)
             log(f"Rate limited for {source_listing_id}; attempt {attempt}/{max_attempts}; retrying in {sleep_for}s")
             if attempt == max_attempts:
                 raise WorkerRateLimitError(
@@ -209,6 +285,7 @@ def fetch_item_detail(access_token: str, source_listing_id: str) -> Dict[str, An
 
         if response.status_code >= 500:
             body = response.text[:1000] if response.text else ""
+            log_ebay_call("5xx", status_code=response.status_code, source_listing_id=source_listing_id)
             if attempt == max_attempts:
                 raise RuntimeError(f"http_{response.status_code}: {body}")
             log(f"Transient server error for {source_listing_id}: {response.status_code}; retrying in {delay}s")
@@ -217,12 +294,15 @@ def fetch_item_detail(access_token: str, source_listing_id: str) -> Dict[str, An
             continue
 
         if response.status_code == 404:
+            log_ebay_call("404", status_code=404, source_listing_id=source_listing_id)
             raise ItemNotFoundError(source_listing_id)
 
         if response.status_code >= 400:
             body = response.text[:1000] if response.text else ""
+            log_ebay_call("4xx", status_code=response.status_code, source_listing_id=source_listing_id)
             raise RuntimeError(f"http_{response.status_code}: {body}")
 
+        log_ebay_call("success", status_code=response.status_code, source_listing_id=source_listing_id)
         return response.json()
 
     raise WorkerRateLimitError(
@@ -517,6 +597,21 @@ def main() -> None:
                 failed += 1
                 mark_job_failed(job, message)
                 log(f"detail failed for {job['source_listing_id']}: {message}")
+        except SharedBudgetExceeded as exc:
+            # Shared cross-script budget is exhausted — not an eBay-side 429,
+            # just us proactively stopping before making another real call.
+            # Requeue everything left for a fresh shot tomorrow (UTC).
+            log(
+                f"Shared eBay daily budget reached ({exc.calls_today}/{EBAY_SHARED_DAILY_CAP}); "
+                f"stopping before job {job['source_listing_id']} and requeueing the rest."
+            )
+            requeued_after_worker_rate_limit += requeue_unprocessed_jobs(
+                jobs,
+                idx,
+                "shared_budget_exceeded",
+                delay_seconds=3600,
+            )
+            break
         except WorkerRateLimitError as exc:
             processed += 1
             failed += 1
