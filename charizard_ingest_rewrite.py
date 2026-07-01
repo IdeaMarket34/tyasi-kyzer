@@ -125,7 +125,10 @@ JUNK_PATTERNS = [
     r"\bplaymat\b",
     r"\bpoker playing card\b",
     r"\bchoose your\b",   # multi-card lot listings ("choose your card/exact card/mini set")
-    r"\bfanart\b",        # non-TCG fan-made cards
+    r"\bfanart\b",        # non-TCG fan-made cards (no space variant)
+    r"\bfan\s+art\b",    # non-TCG fan-made cards ("Fan Art" with space — session #63)
+    r"\bvinyl\b",        # vinyl/non-TCG collector cards ("Fan Art Vinyl Collector Card")
+    r"\bsuper premium collection\b",  # sealed product, not a single card (session #63)
     # Sealed / non-individual-card products — these can never match a single
     # pokemon_cards row, so they were piling up in the unmatched-non-junk
     # bucket instead of being filtered out. Added session #27.
@@ -713,6 +716,12 @@ def extract_language(t: str) -> str:
     # "jpn" is extremely common in eBay titles ("JPN", "Jpn") — catch it alongside "jp".
     if "japanese" in t or re.search(r"\bjpn?\b", t):
         return "ja"
+    # Chinese-market cards: "Chinese", "S-Chinese" in title (session #63 / issue #42).
+    # After normalize_text() these are lowercase; the hyphen in "s-chinese" is preserved
+    # because normalize_text() keeps hyphens. Check before falling back to "en" so titles
+    # like "Pokemon S-Chinese Charizard VMAX" route to the _zh group, not _en.
+    if re.search(r"\bs-?chinese\b|\bchinese\b", t):
+        return "zh"
     return "en"
 
 
