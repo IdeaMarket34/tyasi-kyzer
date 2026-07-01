@@ -363,7 +363,7 @@ def upsert_market_listing_summaries(source: str, items: List[dict]) -> None:
             "current_price_value": float(price["value"]) if price.get("value") else None,
             "current_price_currency": price.get("currency", "USD"),
             "condition_text": item.get("condition"),
-            "listing_type": item.get("buyingOptions", [None])[0] if item.get("buyingOptions") else None,
+            "listing_type": "FIXED_PRICE" if "FIXED_PRICE" in (item.get("buyingOptions") or []) else (item.get("buyingOptions") or [None])[0],
             "listing_start": item.get("itemCreationDate"),
             "listing_end": item.get("itemEndDate"),
             "listing_status": "active",
@@ -419,16 +419,20 @@ def seller_passes_filter(item: dict) -> bool:
 
 
 def has_fixed_price(item: dict) -> bool:
-    """Return True if the listing has a Buy It Now / fixed price option.
+    """Return True only if the listing is a pure fixed-price listing.
 
-    Auction-only listings (buyingOptions == ["AUCTION"]) have no real price —
-    only a current bid, which is misleading for median price calculations
-    and useless for direct comparison. We only ingest listings that include
-    FIXED_PRICE (BIN) as a buying option, which includes straight fixed-price
-    listings as well as auctions with a Buy It Now price attached.
+    We reject any listing that includes AUCTION in its buyingOptions — this
+    covers both auction-only listings (["AUCTION"]) and dual-mode listings
+    (["AUCTION", "FIXED_PRICE"]), which are auctions with a Buy It Now price
+    attached. Dual-mode listings have an unreliable price (the BIN price often
+    disappears once bidding reaches a threshold) and fundamentally behave as
+    auctions, so they are not useful for fixed-price deal-finding.
+
+    Accepted: ["FIXED_PRICE"], ["FIXED_PRICE", "BEST_OFFER"]
+    Rejected: ["AUCTION"], ["AUCTION", "FIXED_PRICE"]
     """
     buying_options = item.get("buyingOptions") or []
-    return "FIXED_PRICE" in buying_options
+    return "FIXED_PRICE" in buying_options and "AUCTION" not in buying_options
 
 
 def is_listing_not_ended(item: dict) -> bool:
@@ -498,8 +502,8 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int,
                 log(f"No items returned for plan {plan['id']} at offset {offset}")
                 break
 
-            # Drop auction-only listings (no Buy It Now price) before any
-            # other processing — current bid price is not a usable price.
+            # Drop auction listings (auction-only AND dual-mode AUCTION+BIN) before
+            # any other processing — we only want pure fixed-price listings.
             pre_auction_filter = len(items)
             items = [item for item in items if has_fixed_price(item)]
             page_auction_filtered = pre_auction_filter - len(items)
