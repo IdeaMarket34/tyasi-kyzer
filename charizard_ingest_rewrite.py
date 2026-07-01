@@ -28,16 +28,25 @@ PROMO_RE = re.compile(r"\b(?:swsh|svp|sm|xy|bw)\s*[-#]?\s*(\d{1,4})\b", re.I)
 FRACTION_RE = re.compile(r"\b([a-z]{0,3}\d{1,4})\s*/\s*([a-z]{0,3}\d{1,4})\b", re.I)
 GRADE_RE = re.compile(r"\b(psa|bgs|cgc|sgc)\s*(\d{1,2}(?:\.\d)?)\b", re.I)
 
-# Raw card condition keywords found in listing titles.
+# Raw card condition keywords found in listing titles and item specifics.
 # Longer/more-specific phrases first so they match before short abbreviations.
 # HP uses a negative lookahead to avoid matching the Pokémon hit-point notation
 # "HP 330" (HP immediately followed by digits = hit points, not condition).
+# damage/dmg map to hp (hp is the lowest tier — no separate "poor" bucket).
 RAW_CONDITION_RE = re.compile(
     r"\b("
     r"near[\s\-]?mint"
+    r"|nr[\s\-.]+mint"           # "Nr. Mint" / "Nr Mint" abbreviation for Near Mint
+    r"|mint[\s\-]?condition"     # "Mint Condition" (avoids standalone "Mint" which
+                                 # often appears in graded-card titles like "PSA Mint 9")
     r"|lightly[\s\-]?played"
+    r"|light[\s\-]?play"         # "Light Play" (without the "-ly")
     r"|moderately[\s\-]?played"
+    r"|moderate[\s\-]?play"      # "Moderate Play"
     r"|heavily[\s\-]?played"
+    r"|heavy[\s\-]?play"         # "Heavy Play"
+    r"|damage[d]?"               # "damage" / "damaged" → hp
+    r"|dmg"                      # "DMG" / "HP/DMG" shorthand → hp
     r"|nm"
     r"|lp"
     r"|mp"
@@ -564,22 +573,33 @@ def extract_grade(t: str) -> Tuple[Optional[str], Optional[float]]:
 
 
 def parse_raw_condition(t: str) -> Optional[str]:
-    """Extract raw card condition (NM/LP/MP/HP) from a normalized title.
+    """Extract raw card condition from a normalized title or item-specifics value.
+
+    Returns lowercase: 'nm', 'lp', 'mp', or 'hp'.
+    HP is the lowest tier — damage/dmg map here too (no separate 'poor' bucket).
     Only meaningful for ungraded listings; call only when grade_company is None.
-    HP is excluded when followed by digits (Pokémon hit points, e.g. 'HP 330').
+    HP abbreviation is excluded when followed by digits (Pokémon hit points,
+    e.g. 'HP 330' on card text) via the negative lookahead in RAW_CONDITION_RE.
     """
     m = RAW_CONDITION_RE.search(t)
     if not m:
         return None
     raw = m.group(1).lower()
-    if raw.startswith("near") or raw == "nm":
-        return "NM"
-    if raw.startswith("lightly") or raw == "lp":
-        return "LP"
-    if raw.startswith("moderately") or raw == "mp":
-        return "MP"
-    if raw.startswith("heavily") or raw == "hp":
-        return "HP"
+    if raw.startswith("near") or raw.startswith("nr") or raw.startswith("mint") or raw == "nm":
+        return "nm"
+    if raw.startswith("lightly") or raw.startswith("light") or raw == "lp":
+        return "lp"
+    if raw.startswith("moderately") or raw.startswith("moderate") or raw == "mp":
+        return "mp"
+    if (raw.startswith("heavily") or raw.startswith("heavy")
+            or raw.startswith("damage") or raw == "dmg" or raw == "hp"):
+        # Extra guard for the bare "HP" abbreviation: reject when the match is
+        # preceded by digits (e.g. "330 HP", "250 HP" = card hit points printed
+        # on the card face). The regex lookahead already blocks "HP 330" (digit
+        # after); this covers the reverse order.
+        if raw == "hp" and re.search(r"(?<!\w)\d{2,3}\s*$", t[: m.start()]):
+            return None
+        return "hp"
     return None
 
 
