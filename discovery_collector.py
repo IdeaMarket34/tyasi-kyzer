@@ -431,6 +431,26 @@ def has_fixed_price(item: dict) -> bool:
     return "FIXED_PRICE" in buying_options
 
 
+def is_listing_not_ended(item: dict) -> bool:
+    """Return True if the listing has not yet ended based on itemEndDate.
+
+    eBay's Browse API search index can include recently-sold/ended listings
+    for a short window after they end. If itemEndDate is present and in the
+    past, the listing is done and should not be ingested as active.
+
+    GTC listings often omit itemEndDate entirely — treat missing as still active
+    rather than dropping valid listings.
+    """
+    end_date = item.get("itemEndDate")
+    if not end_date:
+        return True  # No end date — assume still active (GTC pattern)
+    try:
+        end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+        return end_dt > datetime.now(timezone.utc)
+    except Exception:
+        return True  # Parse failure — pass through conservatively
+
+
 def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int, int]:
     search_run_id = create_search_run(plan)
     api_calls_used = 0
@@ -439,6 +459,7 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int,
     duplicate_count = 0
     filtered_count = 0
     auction_filtered_count = 0
+    ended_filtered_count = 0
     all_summary_events: List[dict] = []
     all_items: List[dict] = []
     queued_listing_ids: List[str] = []
@@ -488,6 +509,18 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int,
                     f"auction-only items (page {page_index})"
                 )
             auction_filtered_count += page_auction_filtered
+
+            # Drop listings whose itemEndDate is already in the past — eBay's
+            # search index occasionally surfaces recently-ended/sold listings. (#34)
+            pre_ended_filter = len(items)
+            items = [item for item in items if is_listing_not_ended(item)]
+            page_ended_filtered = pre_ended_filter - len(items)
+            if page_ended_filtered:
+                log(
+                    f"  Ended filter: dropped {page_ended_filtered}/{pre_ended_filter} "
+                    f"already-ended items (page {page_index})"
+                )
+            ended_filtered_count += page_ended_filtered
 
             # Drop listings from low-feedback / brand-new sellers before any
             # processing — they never reach raw_market_events or market_listings.
@@ -563,6 +596,7 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int,
                     "duplicate_item_count": duplicate_count,
                     "filtered_seller_count": filtered_count,
                     "filtered_auction_count": auction_filtered_count,
+                    "filtered_ended_count": ended_filtered_count,
                     "error_count": 0,
                 },
             )
@@ -574,9 +608,9 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int,
             f"Plan {plan['id']} {final_status}: calls={api_calls_used} "
             f"results={total_results} unique={unique_count} "
             f"filtered_sellers={filtered_count} filtered_auctions={auction_filtered_count} "
-            f"queued={queued_count}"
+            f"filtered_ended={ended_filtered_count} queued={queued_count}"
         )
-        return api_calls_used, total_results, unique_count, queued_count, filtered_count, auction_filtered_count
+        return api_calls_used, total_results, unique_count, queued_count, filtered_count, auction_filtered_count, ended_filtered_count
 
     except Exception as e:
         log(f"Plan failed {plan['id']}: {e}")
@@ -593,7 +627,7 @@ def process_plan(plan: dict, remaining_budget: int) -> Tuple[int, int, int, int,
                     "error_message": str(e),
                 },
             )
-        return api_calls_used, total_results, unique_count, 0, 0, 0
+        return api_calls_used, total_results, unique_count, 0, 0, 0, 0
 
 
 def main() -> None:
@@ -614,6 +648,7 @@ def main() -> None:
     total_queued = 0
     total_filtered = 0
     total_auction_filtered = 0
+    total_ended_filtered = 0
     plans_skipped = 0
 
     for plan in plans:
@@ -627,7 +662,7 @@ def main() -> None:
             plans_skipped += 1
             continue
 
-        calls_used, result_count, unique_count, queued_count, filtered_count, auction_filtered_count = process_plan(plan, remaining_budget)
+        calls_used, result_count, unique_count, queued_count, filtered_count, auction_filtered_count, ended_filtered_count = process_plan(plan, remaining_budget)
         remaining_budget -= calls_used
         total_calls += calls_used
         total_results += result_count
@@ -635,6 +670,7 @@ def main() -> None:
         total_queued += queued_count
         total_filtered += filtered_count
         total_auction_filtered += auction_filtered_count
+        total_ended_filtered += ended_filtered_count
 
     log(
         json.dumps(
@@ -646,6 +682,7 @@ def main() -> None:
                 "unique_or_changed": total_unique,
                 "seller_filtered": total_filtered,
                 "auction_filtered": total_auction_filtered,
+                "ended_filtered": total_ended_filtered,
                 "detail_jobs_queued": total_queued,
                 "remaining_budget": remaining_budget,
             }
